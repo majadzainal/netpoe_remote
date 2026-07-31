@@ -54,6 +54,7 @@ try {
 
     $rules = $api->comm('/ip/firewall/nat/print', [
         '?comment' => $router['remote_nat_comment'],
+        '.proplist' => '.id,comment,to-addresses',
     ]);
 
     $trap = findRouterosTrap($rules);
@@ -108,5 +109,77 @@ if ($redirectHost === '') {
 $redirectHost = preg_replace('#^https?://#i', '', $redirectHost);
 $redirectHost = rtrim($redirectHost, '/');
 
-header('Location: http://' . $redirectHost . ':' . (int) $router['remote_port'], true, 302);
-exit;
+$targetUrl = 'http://' . $redirectHost . ':' . (int) $router['remote_port'];
+?>
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Membuka Remote Modem</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: Arial, sans-serif;
+            background: #f4f6f8;
+            color: #1f2937;
+        }
+
+        main {
+            width: min(100% - 32px, 480px);
+            padding: 28px;
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+        }
+
+        h1 {
+            margin: 0 0 10px;
+            font-size: 22px;
+            line-height: 1.2;
+        }
+
+        p {
+            margin: 0 0 18px;
+            color: #4b5563;
+            line-height: 1.5;
+        }
+
+        code {
+            word-break: break-all;
+        }
+
+        a {
+            display: inline-block;
+            padding: 11px 14px;
+            border-radius: 6px;
+            background: #2563eb;
+            color: #ffffff;
+            font-weight: 700;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>NAT berhasil diupdate</h1>
+        <p>Remote modem diarahkan ke IP client <strong><?= htmlspecialchars($remoteIp, ENT_QUOTES, 'UTF-8') ?></strong>.</p>
+        <p>Membuka: <code><?= htmlspecialchars($targetUrl, ENT_QUOTES, 'UTF-8') ?></code></p>
+        <a href="<?= htmlspecialchars($targetUrl, ENT_QUOTES, 'UTF-8') ?>">Buka Remote Modem</a>
+    </main>
+    <script>
+        setTimeout(() => {
+            window.location.href = <?= json_encode($targetUrl, JSON_UNESCAPED_SLASHES) ?>;
+        }, 700);
+    </script>
+</body>
+</html>

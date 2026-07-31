@@ -11,6 +11,7 @@ checkUser();
 $userId = (int) $_SESSION['user_id'];
 $error = '';
 $activeClients = [];
+$search = trim($_GET['search'] ?? '');
 
 $stmt = $pdo->prepare(
     'SELECT id, ip_address, api_user, api_pass, api_port FROM routers WHERE user_id = :user_id ORDER BY id ASC LIMIT 1'
@@ -42,6 +43,21 @@ if (!$router) {
         $api->disconnect();
         $error = 'Gagal mengambil data PPPoE: ' . $exception->getMessage();
     }
+}
+
+if ($search !== '') {
+    $keyword = strtolower($search);
+    $activeClients = array_values(array_filter($activeClients, static function (array $client) use ($keyword): bool {
+        $haystack = implode(' ', [
+            $client['name'] ?? '',
+            $client['service'] ?? '',
+            $client['caller-id'] ?? '',
+            $client['address'] ?? '',
+            $client['uptime'] ?? '',
+        ]);
+
+        return str_contains(strtolower($haystack), $keyword);
+    }));
 }
 ?>
 <!DOCTYPE html>
@@ -157,6 +173,21 @@ if (!$router) {
             font-size: 14px;
         }
 
+        .search-button {
+            align-self: end;
+            padding: 11px 14px;
+            border: 0;
+            border-radius: 6px;
+            background: #2563eb;
+            color: #ffffff;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .search-button:hover {
+            background: #1d4ed8;
+        }
+
         .table-wrap {
             overflow-x: auto;
         }
@@ -239,20 +270,23 @@ if (!$router) {
                 <div class="alert"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
             <?php endif; ?>
 
-            <div class="toolbar">
+            <form class="toolbar" method="get" action="">
                 <div class="search-box">
                     <label for="pppoe-search">Search PPPoE</label>
                     <input
                         type="search"
                         id="pppoe-search"
+                        name="search"
+                        value="<?= htmlspecialchars($search, ENT_QUOTES, 'UTF-8') ?>"
                         placeholder="Cari name, caller ID, address..."
                         autocomplete="off"
                     >
                 </div>
+                <button class="search-button" type="submit">Cari</button>
                 <div class="result-count" id="pppoe-result-count">
                     Total: <?= count($activeClients) ?> client
                 </div>
-            </div>
+            </form>
 
             <div class="table-wrap">
                 <table>
@@ -275,7 +309,7 @@ if (!$router) {
 
                         <?php foreach ($activeClients as $client): ?>
                             <?php $clientIp = $client['address'] ?? ''; ?>
-                            <tr>
+                            <tr class="pppoe-row">
                                 <td><?= htmlspecialchars($client['name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                                 <td><?= htmlspecialchars($client['service'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                                 <td><?= htmlspecialchars($client['caller-id'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
