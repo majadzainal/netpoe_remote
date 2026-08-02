@@ -278,7 +278,7 @@ if ($search !== '') {
                         id="pppoe-search"
                         name="search"
                         value="<?= htmlspecialchars($search, ENT_QUOTES, 'UTF-8') ?>"
-                        placeholder="Cari name, caller ID, address..."
+                        placeholder="Cari name, caller ID, address....."
                         autocomplete="off"
                     >
                 </div>
