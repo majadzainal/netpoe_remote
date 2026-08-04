@@ -7,7 +7,7 @@ require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../libs/OltTelnet.php';
 
 checkUser();
-set_time_limit(25);
+set_time_limit(120);
 
 $userId = (int) $_SESSION['user_id'];
 $message = '';
@@ -58,6 +58,12 @@ try {
     $pdo->exec("ALTER TABLE olts ADD COLUMN onu_list_command VARCHAR(255) NOT NULL DEFAULT 'show onu all' AFTER optical_command");
 } catch (Throwable $exception) {
     // Column already exists or the table has not been created by an older schema.
+}
+
+try {
+    $pdo->exec("ALTER TABLE olts ADD COLUMN pon_port_count TINYINT UNSIGNED NOT NULL DEFAULT 4 AFTER onu_list_command");
+} catch (Throwable $exception) {
+    // Column already exists.
 }
 
 $stmt = $pdo->prepare('SELECT * FROM olts WHERE user_id = :user_id ORDER BY id ASC LIMIT 1');
@@ -134,6 +140,41 @@ function parseOpticalPower(string $output): array
     return ['tx' => $tx, 'rx' => $rx];
 }
 
+/**
+ * Parse TX/RX optical dari output 'show ont-optical all' (HSGQ format)
+ * dengan mencari baris yang ONU ID-nya cocok dengan $ponOnu.
+ *
+ * Format baris HSGQ:
+ *   1/0 HWTCdf648270 43 C 3.24 V  14.58 mA  1.4840 dBm  -19.4700 dBm  001-03-aina
+ *
+ * @return array{tx: float|null, rx: float|null, found: bool}
+ */
+function parseOpticalPowerFromAllOutput(string $output, string $ponOnu): array
+{
+    $ponOnu = trim($ponOnu);
+    $lines  = preg_split('/\R/', $output) ?: [];
+
+    foreach ($lines as $line) {
+        $trimmed = trim($line);
+
+        // Pastikan baris dimulai dengan ONU ID yang tepat (contoh: "1/0 " atau "1/10 ")
+        if (!preg_match('/^' . preg_quote($ponOnu, '/') . '\s/', $trimmed)) {
+            continue;
+        }
+
+        // Parse format HSGQ: PON/ONU  SN  Temp C  Voltage V  Bias mA  TX dBm  RX dBm  [Name]
+        if (preg_match(
+            '/^\d+\/\d+\s+\S+\s+\d+\s+C\s+[\d.]+\s+V\s+[\d.]+\s+mA\s+([-+]?[\d.]+)\s+dBm\s+([-+]?[\d.]+)\s+dBm/',
+            $trimmed,
+            $m
+        ) === 1) {
+            return ['tx' => (float) $m[1], 'rx' => (float) $m[2], 'found' => true];
+        }
+    }
+
+    return ['tx' => null, 'rx' => null, 'found' => false];
+}
+
 function parseOnuList(string $output): array
 {
     $rows = [];
@@ -158,14 +199,17 @@ function parseOnuList(string $output): array
         }
 
         $rows[] = [
-            'pon_onu' => $currentPonOnu,
-            'status' => $statusParts !== [] ? implode(', ', $statusParts) : 'Optical data tersedia',
-            'raw' => $currentPonOnu,
+            'pon_onu'  => $currentPonOnu,
+            'mac'      => '',
+            'status'   => $statusParts !== [] ? implode(', ', $statusParts) : 'Optical data tersedia',
+            'uptime'   => '',
+            'name'     => '',
+            'raw'      => $currentPonOnu,
         ];
 
         $currentPonOnu = '';
-        $currentTx = null;
-        $currentRx = null;
+        $currentTx     = null;
+        $currentRx     = null;
     };
 
     foreach ($lines as $line) {
@@ -187,15 +231,76 @@ function parseOnuList(string $output): array
             continue;
         }
 
-        if ($line === '' || str_starts_with($line, '-') || preg_match('/^(pon|onu|index|id)\b/i', $line) === 1) {
+        if ($line === '' || str_starts_with($line, '=') || str_starts_with($line, '-') || preg_match('/^(pon|onu|onuid|index|id|pon\/onu)\b/i', $line) === 1) {
             continue;
         }
 
+        // ----------------------------------------------------------------
+        // Format HSGQ G02: show ont-optical all
+        // Contoh: 1/0 HWTCdf648270 43 C 3.24 V   14.58 mA 1.4840 dBm   -19.4700 dBm 001-03-aina
+        // Kolom: PON/ONU  ONT-SN  Temp C  Voltage V  Bias mA  TxPower dBm  RxPower dBm  ONT-Name
+        // ----------------------------------------------------------------
+        if (preg_match(
+            '/^(\d+\/\d+)\s+(\S+)\s+\d+\s+C\s+[\d.]+\s+V\s+[\d.]+\s+mA\s+([-+]?[\d.]+)\s+dBm\s+([-+]?[\d.]+)\s+dBm\s*(.*)$/',
+            $line,
+            $match
+        ) === 1) {
+            $onuId = $match[1];
+            $sn    = $match[2];
+            $txDbm = $match[3];
+            $rxDbm = $match[4];
+            $name  = trim($match[5]);
+
+            $rows[] = [
+                'pon_onu' => $onuId,
+                'mac'     => $sn,           // ONT Serial Number
+                'status'  => 'Up',
+                'uptime'  => 'Tx: ' . $txDbm . ' dBm | Rx: ' . $rxDbm . ' dBm',
+                'name'    => $name,
+                'raw'     => $line,
+            ];
+            continue;
+        }
+
+        // ----------------------------------------------------------------
+        // Format Hioso EPON: show onu info epon 0/X all
+        // Contoh: 0/1:42 b4:e4:6b:73:07:81 Up 101 9127 1 3 1 CtcNegDone 30 Yes 15H14M17S [name]
+        // ----------------------------------------------------------------
+        if (preg_match(
+            '/^(\d+\/\d+:\d+)\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\s+(\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\S+)\s+\S+\s+\S+\s+(\S+)(?:\s+(.*))?$/',
+            $line,
+            $match
+        ) === 1) {
+            // Ubah 0/1:42 → 0/1 42 untuk dipakai di command telnet
+            $onuId     = str_replace(':', ' ', $match[1]);
+            $mac       = $match[2];
+            $status    = $match[3];
+            $ctcStatus = $match[4];  // CtcNegDone atau --
+            $uptime    = $match[5];
+            $name      = trim($match[6] ?? '');
+
+            $rows[] = [
+                'pon_onu' => $onuId,
+                'mac'     => $mac,
+                'status'  => ($ctcStatus !== '--' ? $status . ' (' . $ctcStatus . ')' : $status),
+                'uptime'  => $uptime,
+                'name'    => $name,
+                'raw'     => $line,
+            ];
+            continue;
+        }
+
+        // ----------------------------------------------------------------
+        // Fallback: format generik lain
+        // ----------------------------------------------------------------
         if (preg_match('/((?:gpon-)?onu[_-]?\S+|\d+\/\d+(?:\/\d+)?(?::\d+)?|\d+)\s+(.+)/i', $line, $match) === 1) {
             $rows[] = [
-                'pon_onu' => $match[1],
-                'status' => trim($match[2]),
-                'raw' => $line,
+                'pon_onu' => str_replace(':', ' ', $match[1]),
+                'mac'     => '',
+                'status'  => trim($match[2]),
+                'uptime'  => '',
+                'name'    => '',
+                'raw'     => $line,
             ];
         }
     }
@@ -297,13 +402,47 @@ function runAllUsefulOltCommands(OltTelnet $telnet, array $olt, array $commands,
 }
 
 if ($olt && $showOnuList) {
-    $telnet = new OltTelnet();
-    [$onuListOutput, $onuListCommandUsed] = runAllUsefulOltCommands(
-        $telnet,
-        $olt,
-        splitOltCommands($olt['onu_list_command'] ?: 'show onu'),
-        8
-    );
+    $ponPortCount = max(1, (int) ($olt['pon_port_count'] ?? 4));
+    $brand        = strtolower((string) ($olt['brand'] ?? ''));
+    $telnet       = new OltTelnet();
+
+    // -------------------------------------------------------------------
+    // Hioso EPON: loop per port dengan show onu info epon 0/X all
+    // -------------------------------------------------------------------
+    if ($brand === 'hioso') {
+        $ponCommands = [];
+        for ($port = 1; $port <= $ponPortCount; $port++) {
+            $ponCommands[] = "show onu info epon 0/{$port} all";
+        }
+
+        $sequence = applyOltCommandMode($olt, $ponCommands);
+        $rawAll   = $telnet->runCommands(
+            $olt['ip_address'],
+            (int) $olt['telnet_port'],
+            $olt['telnet_user'],
+            $olt['telnet_pass'],
+            $sequence,
+            15
+        );
+
+        if (isUsefulTelnetOutput($rawAll)) {
+            $onuListOutput      = $rawAll;
+            $onuListCommandUsed = 'show onu info epon 0/1~0/' . $ponPortCount . ' all';
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Brand lain (HSGQ, ZTE, Huawei, dll): gunakan onu_list_command
+    // dari pengaturan OLT langsung tanpa mencoba EPON loop
+    // -------------------------------------------------------------------
+    if ($onuListOutput === '') {
+        [$onuListOutput, $onuListCommandUsed] = runAllUsefulOltCommands(
+            $telnet,
+            $olt,
+            splitOltCommands($olt['onu_list_command'] ?: 'show onu'),
+            15
+        );
+    }
 
     if ($onuListOutput === '') {
         $error = $telnet->getError() ?: 'Tidak ada output list ONU dari OLT.';
@@ -341,81 +480,84 @@ if ($olt && $selectedPppoe !== '') {
     }
 
     if ($selectedMapping) {
-        $commands = array_map(static function (string $command) use ($selectedMapping): string {
-            return str_replace('{pon_onu}', $selectedMapping['pon_onu'], $command);
-        }, splitOltCommands($olt['optical_command']));
+        $brand  = strtolower((string) ($olt['brand'] ?? ''));
         $telnet = new OltTelnet();
-        [$rawOutput, $opticalCommandUsed] = runFirstUsefulOltCommand($telnet, $olt, $commands, 8);
 
-        if ($rawOutput === '') {
-            $error = $telnet->getError() ?: 'Tidak ada output dari OLT.';
-        } elseif (!isUsefulTelnetOutput($rawOutput)) {
-            $error = 'Semua kandidat command optical power gagal. Cek Raw Output lalu update config/olt_profiles.json.';
+        if ($brand === 'hsgq') {
+            // ---------------------------------------------------------------
+            // HSGQ: jalankan show ont-optical all, lalu cari baris ONU ID
+            // yang cocok dengan mapping pon_onu (contoh: 1/0, 1/5, dst.)
+            // ---------------------------------------------------------------
+            $rawOutput = $telnet->runCommands(
+                $olt['ip_address'],
+                (int) $olt['telnet_port'],
+                $olt['telnet_user'],
+                $olt['telnet_pass'],
+                ['enable', 'configure', 'show ont-optical all'],
+                15
+            );
+            $opticalCommandUsed = 'enable → configure → show ont-optical all';
+
+            if ($rawOutput === '') {
+                $error = $telnet->getError() ?: 'Tidak ada output dari OLT.';
+            } else {
+                $found = parseOpticalPowerFromAllOutput($rawOutput, $selectedMapping['pon_onu']);
+                if ($found['found']) {
+                    $opticalData = ['tx' => $found['tx'], 'rx' => $found['rx']];
+                } else {
+                    $error = 'ONU ID "' . htmlspecialchars($selectedMapping['pon_onu'], ENT_QUOTES, 'UTF-8')
+                           . '" tidak ditemukan dalam output show ont-optical all.';
+                }
+            }
         } else {
-            $opticalData = parseOpticalPower($rawOutput);
+            // ---------------------------------------------------------------
+            // Brand lain (Hioso, ZTE, Huawei, dll): gunakan optical_command
+            // dari pengaturan dengan {pon_onu} diganti nilai mapping
+            // ---------------------------------------------------------------
+            $commands = array_map(static function (string $command) use ($selectedMapping): string {
+                return str_replace('{pon_onu}', $selectedMapping['pon_onu'], $command);
+            }, splitOltCommands($olt['optical_command']));
+
+            [$rawOutput, $opticalCommandUsed] = runFirstUsefulOltCommand($telnet, $olt, $commands, 8);
+
+            if ($rawOutput === '') {
+                $error = $telnet->getError() ?: 'Tidak ada output dari OLT.';
+            } elseif (!isUsefulTelnetOutput($rawOutput)) {
+                $error = 'Semua kandidat command optical power gagal. Cek Raw Output lalu update config/olt_profiles.json.';
+            } else {
+                $opticalData = parseOpticalPower($rawOutput);
+            }
         }
     }
 }
+
+$pageTitle  = 'Monitoring OLT';
+$activePage = 'olt_monitor';
+require_once __DIR__ . '/partials/header.php';
 ?>
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Monitoring OLT - NetPoe Remote</title>
-    <style>
-        * { box-sizing: border-box; }
-        body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
-        header { background: #ffffff; border-bottom: 1px solid #e5e7eb; }
-        .topbar, main { width: min(100% - 32px, 1120px); margin: 0 auto; }
-        .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; }
-        h1 { margin: 0; font-size: 24px; line-height: 1.2; }
-        .nav a { margin-left: 12px; color: #2563eb; font-weight: 700; text-decoration: none; font-size: 14px; }
-        main { padding: 28px 0; }
-        .layout { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
-        .panel { padding: 22px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05); }
-        .alert { margin-bottom: 18px; padding: 11px 12px; border-radius: 6px; font-size: 14px; }
-        .success { border: 1px solid #bbf7d0; background: #f0fdf4; color: #166534; }
-        .error { border: 1px solid #fecaca; background: #fef2f2; color: #991b1b; }
-        h2 { margin: 0 0 16px; font-size: 18px; }
-        label { display: block; margin-bottom: 7px; font-weight: 700; font-size: 14px; }
-        input, select { width: 100%; padding: 11px 12px; margin-bottom: 16px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; background: #ffffff; }
-        .inline-form { display: flex; gap: 10px; align-items: end; margin-bottom: 18px; }
-        .inline-form div { flex: 1; }
-        .inline-form input { margin-bottom: 0; }
-        button, .button { display: inline-block; padding: 11px 14px; border: 0; border-radius: 6px; background: #2563eb; color: #ffffff; font-weight: 700; text-decoration: none; cursor: pointer; }
-        button:hover, .button:hover { background: #1d4ed8; }
-        .meta { margin: 0 0 16px; color: #4b5563; font-size: 14px; line-height: 1.5; }
-        .metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 18px; }
-        .metric { padding: 16px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
-        .metric span { display: block; color: #6b7280; font-size: 13px; }
-        .metric strong { display: block; margin-top: 8px; font-size: 26px; }
-        canvas { width: 100%; height: 240px; border: 1px solid #e5e7eb; border-radius: 8px; background: #ffffff; }
-        table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-        th, td { padding: 10px 11px; border-bottom: 1px solid #e5e7eb; text-align: left; font-size: 14px; }
-        th { background: #f9fafb; color: #374151; }
-        pre { overflow: auto; max-height: 260px; padding: 14px; border-radius: 8px; background: #111827; color: #e5e7eb; font-size: 12px; }
-        @media (max-width: 900px) { .topbar { align-items: flex-start; flex-direction: column; } .layout { grid-template-columns: 1fr; } .nav a { display: inline-block; margin: 0 12px 8px 0; } .inline-form { align-items: stretch; flex-direction: column; } }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="topbar">
-            <h1>Monitoring OLT</h1>
-            <nav class="nav">
-                <a href="dashboard.php">Dashboard</a>
-                <a href="pppoe.php">PPPoE</a>
-                <a href="olt_setting.php">Pengaturan OLT</a>
-                <a href="../logout.php">Logout</a>
-            </nav>
-        </div>
-    </header>
+<style>
+.layout { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+.panel { padding: 22px; background: var(--clr-surface); border: 1px solid var(--clr-border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.panel h2 { font-size: 16px; margin-bottom: 16px; color: var(--clr-text); }
+.meta { margin: 0 0 14px; color: var(--clr-muted); font-size: 13px; line-height: 1.6; }
+.metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 18px; }
+.metric { padding: 16px; border: 1px solid var(--clr-border); border-radius: 10px; background: rgba(255,255,255,0.04); }
+.metric span { display: block; color: var(--clr-muted); font-size: 13px; }
+.metric strong { display: block; margin-top: 8px; font-size: 24px; color: var(--clr-text); }
+.button { display:inline-flex; align-items:center; padding:9px 16px; border-radius:8px; background:linear-gradient(135deg,#6366f1,#8b5cf6); color:#fff; font-weight:700; text-decoration:none; font-size:13px; }
+.inline-form { display: flex; gap: 10px; align-items: end; margin-bottom: 18px; }
+.inline-form > div { flex: 1; }
+.inline-form input { margin-bottom: 0; }
+cavas { border-radius: 8px; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .inline-form { flex-direction: column; } }
+</style>
+<div class="page-wrap">
+<p class="page-heading">Monitoring OLT</p>
+<p class="page-sub">Monitor status ONU, optical power, dan mapping PPPoE.</p>
+<?php if ($message !== ''): ?><div class="alert alert-success"><?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
+<?php if ($error !== ''): ?><div class="alert alert-error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
+<div class="layout">
 
-    <main>
-        <?php if ($message !== ''): ?><div class="alert success"><?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
-        <?php if ($error !== ''): ?><div class="alert error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
-
-        <div class="layout">
             <section class="panel">
                 <h2>Tambah Mapping</h2>
                 <form method="post" action="">
@@ -428,7 +570,7 @@ if ($olt && $selectedPppoe !== '') {
                     <label for="customer_name">Nama Pelanggan</label>
                     <input type="text" id="customer_name" name="customer_name" placeholder="Opsional">
 
-                    <button type="submit" name="action" value="save_mapping">Simpan Mapping</button>
+                    <button type="submit" class="button" name="action" value="save_mapping">Simpan Mapping</button>
                 </form>
 
                 <table>
@@ -482,15 +624,18 @@ if ($olt && $selectedPppoe !== '') {
                         <p class="meta">Command dipakai: <code><?= htmlspecialchars($onuListCommandUsed, ENT_QUOTES, 'UTF-8') ?></code></p>
                     <?php endif; ?>
                     <table>
-                        <thead><tr><th>PON/ONU</th><th>Status / Data</th></tr></thead>
+                        <thead><tr><th>ONU ID</th><th>MAC / Serial</th><th>Status</th><th>Uptime / Optical</th><th>Nama</th></tr></thead>
                         <tbody>
                             <?php if ($onuRows === []): ?>
-                                <tr><td colspan="2">Output belum bisa diparse otomatis. Lihat Raw List ONU di bawah.</td></tr>
+                                <tr><td colspan="5">Output belum bisa diparse otomatis. Lihat Raw List ONU di bawah.</td></tr>
                             <?php endif; ?>
                             <?php foreach ($onuRows as $onuRow): ?>
                                 <tr>
-                                    <td><?= htmlspecialchars($onuRow['pon_onu'], ENT_QUOTES, 'UTF-8') ?></td>
-                                    <td><?= htmlspecialchars($onuRow['status'], ENT_QUOTES, 'UTF-8') ?></td>
+                                    <td><code><?= htmlspecialchars($onuRow['pon_onu'], ENT_QUOTES, 'UTF-8') ?></code></td>
+                                    <td><?= htmlspecialchars($onuRow['mac'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
+                                    <td style="color: <?= ($onuRow['status'] ?? '') !== '' && str_starts_with($onuRow['status'], 'Up') ? '#166534' : '#991b1b' ?>; font-weight:700"><?= htmlspecialchars($onuRow['status'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
+                                    <td><?= htmlspecialchars($onuRow['uptime'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
+                                    <td><?= htmlspecialchars($onuRow['name'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
@@ -527,7 +672,7 @@ if ($olt && $selectedPppoe !== '') {
                 <?php endif; ?>
             </section>
         </div>
-    </main>
+</div>
 
     <script>
         const tx = <?= json_encode($opticalData['tx'] ?? null) ?>;
@@ -537,9 +682,9 @@ if ($olt && $selectedPppoe !== '') {
 
         function drawChart(values) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle = '#1a1d2e';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.strokeStyle = '#e5e7eb';
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
             ctx.lineWidth = 1;
 
             for (let i = 0; i <= 5; i += 1) {
@@ -571,21 +716,22 @@ if ($olt && $selectedPppoe !== '') {
                 const x = 135 + (index * (barWidth + gap));
                 const normalized = item.value === null ? 0 : (item.value - min) / (max - min);
                 const height = Math.max(4, Math.min(180, normalized * 180));
-                ctx.fillStyle = item.color;
+        ctx.fillStyle = item.color;
                 ctx.fillRect(x, baseY - height, barWidth, height);
-                ctx.fillStyle = '#111827';
-                ctx.font = 'bold 16px Arial';
+                ctx.fillStyle = '#e2e8f0';
+                ctx.font = 'bold 15px Inter, Arial';
                 ctx.fillText(item.value === null ? '-' : `${item.value} dBm`, x, baseY - height - 10);
-                ctx.fillStyle = '#374151';
-                ctx.font = '14px Arial';
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '13px Inter, Arial';
                 ctx.fillText(item.label, x + 36, 244);
             });
         }
 
         drawChart([
-            { label: 'TX', value: tx, color: '#2563eb' },
-            { label: 'RX', value: rx, color: '#16a34a' },
+            { label: 'TX', value: tx, color: '#6366f1' },
+            { label: 'RX', value: rx, color: '#10b981' },
         ]);
     </script>
+</div>
 </body>
 </html>

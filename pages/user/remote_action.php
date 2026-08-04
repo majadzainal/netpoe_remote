@@ -110,76 +110,64 @@ $redirectHost = preg_replace('#^https?://#i', '', $redirectHost);
 $redirectHost = rtrim($redirectHost, '/');
 
 $targetUrl = 'http://' . $redirectHost . ':' . (int) $router['remote_port'];
+$pageTitle  = 'Remote Modem';
+$activePage = '';
+require_once __DIR__ . '/partials/header.php';
 ?>
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Membuka Remote Modem</title>
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            margin: 0;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-family: Arial, sans-serif;
-            background: #f4f6f8;
-            color: #1f2937;
-        }
-
-        main {
-            width: min(100% - 32px, 480px);
-            padding: 28px;
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
-        }
-
-        h1 {
-            margin: 0 0 10px;
-            font-size: 22px;
-            line-height: 1.2;
-        }
-
-        p {
-            margin: 0 0 18px;
-            color: #4b5563;
-            line-height: 1.5;
-        }
-
-        code {
-            word-break: break-all;
-        }
-
-        a {
-            display: inline-block;
-            padding: 11px 14px;
-            border-radius: 6px;
-            background: #2563eb;
-            color: #ffffff;
-            font-weight: 700;
-            text-decoration: none;
-        }
-    </style>
-</head>
-<body>
-    <main>
-        <h1>NAT berhasil diupdate</h1>
-        <p>Remote modem diarahkan ke IP client <strong><?= htmlspecialchars($remoteIp, ENT_QUOTES, 'UTF-8') ?></strong>.</p>
-        <p>Membuka: <code><?= htmlspecialchars($targetUrl, ENT_QUOTES, 'UTF-8') ?></code></p>
-        <a href="<?= htmlspecialchars($targetUrl, ENT_QUOTES, 'UTF-8') ?>">Buka Remote Modem</a>
-    </main>
-    <script>
-        setTimeout(() => {
+<style>
+.remote-card {
+    max-width: 480px;
+    margin: 80px auto;
+    background: var(--clr-surface);
+    border: 1px solid rgba(99,102,241,0.3);
+    border-radius: 18px;
+    padding: 36px 32px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    text-align: center;
+}
+.success-icon {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    background: linear-gradient(135deg,#10b981,#059669);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px;
+    margin: 0 auto 20px;
+    box-shadow: 0 4px 18px rgba(16,185,129,0.35);
+}
+.remote-card h1 { font-size: 20px; margin-bottom: 12px; }
+.remote-card p { color: var(--clr-muted); font-size: 14px; line-height: 1.6; margin-bottom: 10px; }
+.remote-card code { color: #a5b4fc; }
+.btn-open {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 24px; border-radius: 10px;
+    background: linear-gradient(135deg,#6366f1,#8b5cf6);
+    color: #fff; font-weight: 700; text-decoration: none;
+    font-size: 14px; margin-top: 16px;
+    box-shadow: 0 4px 14px rgba(99,102,241,0.35);
+    transition: transform .15s, opacity .15s;
+}
+.btn-open:hover { transform: translateY(-2px); opacity: .92; }
+.countdown { font-size: 12px; color: var(--clr-muted); margin-top: 12px; }
+</style>
+<div class="remote-card">
+    <div class="success-icon">✓</div>
+    <h1>NAT Berhasil Diupdate</h1>
+    <p>Remote modem diarahkan ke IP client <strong><?= htmlspecialchars($remoteIp, ENT_QUOTES, 'UTF-8') ?></strong>.</p>
+    <p>Membuka: <code><?= htmlspecialchars($targetUrl, ENT_QUOTES, 'UTF-8') ?></code></p>
+    <a class="btn-open" href="<?= htmlspecialchars($targetUrl, ENT_QUOTES, 'UTF-8') ?>">🔗 Buka Remote Modem</a>
+    <p class="countdown" id="countdown">Otomatis redirect dalam <span id="secs">3</span> detik…</p>
+</div>
+<script>
+    let n = 3;
+    const el = document.getElementById('secs');
+    const t = setInterval(() => {
+        n--;
+        el.textContent = n;
+        if (n <= 0) {
+            clearInterval(t);
             window.location.href = <?= json_encode($targetUrl, JSON_UNESCAPED_SLASHES) ?>;
-        }, 700);
-    </script>
+        }
+    }, 1000);
+</script>
 </body>
 </html>

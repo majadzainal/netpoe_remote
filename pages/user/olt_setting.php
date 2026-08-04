@@ -40,8 +40,14 @@ try {
     // Column already exists or the table has not been created by an older schema.
 }
 
+try {
+    $pdo->exec("ALTER TABLE olts ADD COLUMN pon_port_count TINYINT UNSIGNED NOT NULL DEFAULT 4 AFTER onu_list_command");
+} catch (Throwable $exception) {
+    // Column already exists.
+}
+
 $stmt = $pdo->prepare(
-    'SELECT id, brand, model, olt_name, ip_address, telnet_user, telnet_pass, telnet_port, optical_command, onu_list_command
+    'SELECT id, brand, model, olt_name, ip_address, telnet_user, telnet_pass, telnet_port, pon_port_count, optical_command, onu_list_command
      FROM olts
      WHERE user_id = :user_id
      ORDER BY id ASC
@@ -57,6 +63,7 @@ $ipAddress = $olt['ip_address'] ?? '202.47.185.158';
 $telnetUser = $olt['telnet_user'] ?? 'admin';
 $telnetPass = $olt['telnet_pass'] ?? 'impjtm2024';
 $telnetPort = (string) ($olt['telnet_port'] ?? 8523);
+$ponPortCount = (string) ($olt['pon_port_count'] ?? 4);
 $activeProfile = findOltProfile($brand, $model);
 $opticalCommand = $olt['optical_command'] ?? implode("\n", getOltProfileCommands($activeProfile, 'optical_power', 'enable | show onu optical-ddm {pon_onu}'));
 $onuListCommand = $olt['onu_list_command'] ?? implode("\n", getOltProfileCommands($activeProfile, 'onu_list', 'show onu'));
@@ -85,11 +92,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $telnetUser = trim($_POST['telnet_user'] ?? '');
     $telnetPass = $_POST['telnet_pass'] ?? '';
     $telnetPort = trim($_POST['telnet_port'] ?? '23');
+    $ponPortCount = trim($_POST['pon_port_count'] ?? '4');
     $opticalCommand = implode("\n", getOltProfileCommands($selectedProfile, 'optical_power', trim($_POST['optical_command'] ?? '')));
     $onuListCommand = implode("\n", getOltProfileCommands($selectedProfile, 'onu_list', trim($_POST['onu_list_command'] ?? '')));
     $testCommand = getOltProfileCommand($selectedProfile, 'test', 'show version');
     $telnetPortNumber = filter_var($telnetPort, FILTER_VALIDATE_INT, [
         'options' => ['min_range' => 1, 'max_range' => 65535],
+    ]);
+    $ponPortCountNumber = filter_var($ponPortCount, FILTER_VALIDATE_INT, [
+        'options' => ['min_range' => 1, 'max_range' => 16],
     ]);
 
     if (
@@ -102,8 +113,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         || $opticalCommand === ''
         || $onuListCommand === ''
         || $telnetPortNumber === false
+        || $ponPortCountNumber === false
     ) {
-        $error = 'Profil OLT, nama OLT, IP, user, password, port, command ONU, dan command optical wajib diisi.';
+        $error = 'Profil OLT, nama OLT, IP, user, password, port, jumlah PON port, command ONU, dan command optical wajib diisi.';
     } elseif ($action === 'save') {
         if ($olt) {
             $stmt = $pdo->prepare(
@@ -115,6 +127,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      telnet_user = :telnet_user,
                      telnet_pass = :telnet_pass,
                      telnet_port = :telnet_port,
+                     pon_port_count = :pon_port_count,
                      optical_command = :optical_command,
                      onu_list_command = :onu_list_command
                  WHERE id = :id AND user_id = :user_id'
@@ -127,6 +140,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'telnet_user' => $telnetUser,
                 'telnet_pass' => $telnetPass,
                 'telnet_port' => $telnetPortNumber,
+                'pon_port_count' => $ponPortCountNumber,
                 'optical_command' => $opticalCommand,
                 'onu_list_command' => $onuListCommand,
                 'id' => (int) $olt['id'],
@@ -135,9 +149,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $stmt = $pdo->prepare(
                 'INSERT INTO olts
-                    (user_id, brand, model, olt_name, ip_address, telnet_user, telnet_pass, telnet_port, optical_command, onu_list_command)
+                    (user_id, brand, model, olt_name, ip_address, telnet_user, telnet_pass, telnet_port, pon_port_count, optical_command, onu_list_command)
                  VALUES
-                    (:user_id, :brand, :model, :olt_name, :ip_address, :telnet_user, :telnet_pass, :telnet_port, :optical_command, :onu_list_command)'
+                    (:user_id, :brand, :model, :olt_name, :ip_address, :telnet_user, :telnet_pass, :telnet_port, :pon_port_count, :optical_command, :onu_list_command)'
             );
             $stmt->execute([
                 'user_id' => $userId,
@@ -148,6 +162,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'telnet_user' => $telnetUser,
                 'telnet_pass' => $telnetPass,
                 'telnet_port' => $telnetPortNumber,
+                'pon_port_count' => $ponPortCountNumber,
                 'optical_command' => $opticalCommand,
                 'onu_list_command' => $onuListCommand,
             ]);
@@ -161,58 +176,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $testMessage = $testSuccess ? 'Koneksi telnet OLT berhasil.' : $telnet->getError();
     }
 }
+$pageTitle  = 'Pengaturan OLT';
+$activePage = 'olt_setting';
+require_once __DIR__ . '/partials/header.php';
 ?>
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pengaturan OLT - NetPoe Remote</title>
-    <style>
-        * { box-sizing: border-box; }
-        body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #1f2937; }
-        header { background: #ffffff; border-bottom: 1px solid #e5e7eb; }
-        .topbar, main { width: min(100% - 32px, 820px); margin: 0 auto; }
-        .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; }
-        h1 { margin: 0; font-size: 24px; line-height: 1.2; }
-        .nav a { margin-left: 12px; color: #2563eb; font-weight: 700; text-decoration: none; font-size: 14px; }
-        main { padding: 28px 0; }
-        .panel { padding: 24px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05); }
-        .alert { margin-bottom: 18px; padding: 11px 12px; border-radius: 6px; font-size: 14px; }
-        .success { border: 1px solid #bbf7d0; background: #f0fdf4; color: #166534; }
-        .error { border: 1px solid #fecaca; background: #fef2f2; color: #991b1b; }
-        label { display: block; margin-bottom: 7px; font-weight: 700; font-size: 14px; }
-        input, select, textarea { width: 100%; padding: 11px 12px; margin-bottom: 16px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; background: #ffffff; }
-        textarea { min-height: 92px; resize: vertical; }
-        input[readonly], textarea[readonly] { background: #f9fafb; color: #4b5563; }
-        input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14); }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
-        .hint { margin: -6px 0 16px; color: #6b7280; font-size: 13px; line-height: 1.5; }
-        .actions { display: flex; gap: 12px; flex-wrap: wrap; }
-        button { padding: 11px 14px; border: 0; border-radius: 6px; background: #2563eb; color: #ffffff; font-weight: 700; cursor: pointer; }
-        button:hover { background: #1d4ed8; }
-        .secondary { background: #374151; }
-        .secondary:hover { background: #1f2937; }
-        @media (max-width: 700px) { .topbar { align-items: flex-start; flex-direction: column; } .grid { grid-template-columns: 1fr; } .nav a { display: inline-block; margin: 0 12px 8px 0; } .actions button { width: 100%; } }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="topbar">
-            <h1>Pengaturan OLT</h1>
-            <nav class="nav">
-                <a href="dashboard.php">Dashboard</a>
-                <a href="olt_monitor.php">Monitoring OLT</a>
-                <a href="router_setting.php">Router</a>
-                <a href="../logout.php">Logout</a>
-            </nav>
-        </div>
-    </header>
-
-    <main>
+<style>
+.panel { padding: 28px; background: var(--clr-surface); border: 1px solid var(--clr-border); border-radius: var(--radius); box-shadow: var(--shadow); max-width: 820px; }
+.panel h2 { font-size:17px; margin-bottom:20px; }
+.actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.secondary { background: rgba(255,255,255,0.08) !important; border: 1px solid var(--clr-border) !important; }
+</style>
+<div class="page-wrap">
+<p class="page-heading">Pengaturan OLT</p>
+<p class="page-sub">Konfigurasi koneksi telnet, profil OLT, dan command.</p>
+<?php if ($message !== ''): ?><div class="alert alert-success"><?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
+<?php if ($error !== ''): ?><div class="alert alert-error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
         <section class="panel">
-            <?php if ($message !== ''): ?><div class="alert success"><?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
-            <?php if ($error !== ''): ?><div class="alert error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
             <?php if ($testMessage !== ''): ?><div class="alert <?= $testSuccess ? 'success' : 'error' ?>"><?= htmlspecialchars($testMessage, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
 
             <form method="post" action="">
@@ -267,6 +246,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
                 </div>
 
+                <div>
+                    <label for="pon_port_count">Jumlah PON Port (EPON)</label>
+                    <input type="number" id="pon_port_count" name="pon_port_count" value="<?= htmlspecialchars($ponPortCount, ENT_QUOTES, 'UTF-8') ?>" min="1" max="16" required>
+                    <p class="hint">Jumlah port EPON pada OLT Anda. Sistem akan menjalankan <code>show onu info epon 0/1 all</code> sampai <code>show onu info epon 0/N all</code> saat Ambil List ONU.</p>
+                </div>
+
                 <label for="onu_list_command">Command List ONU</label>
                 <textarea id="onu_list_command" name="onu_list_command" readonly required><?= htmlspecialchars($onuListCommand, ENT_QUOTES, 'UTF-8') ?></textarea>
 
@@ -280,7 +265,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 </div>
             </form>
         </section>
-    </main>
+</div>
     <script>
         const profiles = <?= json_encode($profiles, JSON_UNESCAPED_SLASHES) ?>;
         const profileSelect = document.getElementById('profile_key');

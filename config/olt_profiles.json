@@ -30,6 +30,23 @@
       "pon_onu_placeholder": "contoh: 1/1:1 atau ONU ID sesuai output list ONU"
     },
     {
+      "brand": "HSGQ",
+      "model": "G02",
+      "label": "HSGQ G02 (2 PON GPON)",
+      "pon_port_count_default": 2,
+      "commands": {
+        "test": "enable | show version",
+        "onu_list": "enable | configure | show ont-optical all",
+        "optical_power": "enable | configure | show ont-optical {pon_onu}",
+        "help": [
+          "enable | ?",
+          "enable | configure | ?",
+          "enable | configure | show ?"
+        ]
+      },
+      "pon_onu_placeholder": "contoh: 1/0 atau 1/5 (format PON/ONU)"
+    },
+    {
       "brand": "ZTE",
       "model": "C320",
       "label": "ZTE C320",

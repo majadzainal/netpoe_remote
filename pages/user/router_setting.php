@@ -123,178 +123,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
+$pageTitle  = 'Pengaturan Router';
+$activePage = 'router';
+require_once __DIR__ . '/partials/header.php';
 ?>
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pengaturan Router - NetPoe Remote</title>
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            margin: 0;
-            font-family: Arial, sans-serif;
-            background: #f4f6f8;
-            color: #1f2937;
-        }
-
-        header {
-            background: #ffffff;
-            border-bottom: 1px solid #e5e7eb;
-        }
-
-        .topbar,
-        main {
-            width: min(100% - 32px, 760px);
-            margin: 0 auto;
-        }
-
-        .topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 16px;
-            padding: 18px 0;
-        }
-
-        h1 {
-            margin: 0;
-            font-size: 24px;
-            line-height: 1.2;
-        }
-
-        .account {
-            color: #6b7280;
-            font-size: 14px;
-        }
-
-        .logout {
-            display: inline-block;
-            margin-left: 12px;
-            color: #2563eb;
-            font-weight: 700;
-            text-decoration: none;
-        }
-
-        main {
-            padding: 28px 0;
-        }
-
-        .panel {
-            padding: 24px;
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
-        }
-
-        .alert {
-            margin-bottom: 18px;
-            padding: 11px 12px;
-            border-radius: 6px;
-            font-size: 14px;
-        }
-
-        .success {
-            border: 1px solid #bbf7d0;
-            background: #f0fdf4;
-            color: #166534;
-        }
-
-        .error {
-            border: 1px solid #fecaca;
-            background: #fef2f2;
-            color: #991b1b;
-        }
-
-        .info {
-            border: 1px solid #bfdbfe;
-            background: #eff6ff;
-            color: #1e40af;
-        }
-
-        label {
-            display: block;
-            margin-bottom: 7px;
-            font-weight: 700;
-            font-size: 14px;
-        }
-
-        input {
-            width: 100%;
-            padding: 11px 12px;
-            margin-bottom: 16px;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 14px;
-            background: #ffffff;
-        }
-
-        input:focus {
-            outline: none;
-            border-color: #2563eb;
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
-        }
-
-        .actions {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-
-        button {
-            padding: 11px 14px;
-            border: 0;
-            border-radius: 6px;
-            background: #2563eb;
-            color: #ffffff;
-            font-weight: 700;
-            cursor: pointer;
-        }
-
-        button:hover {
-            background: #1d4ed8;
-        }
-
-        .secondary {
-            background: #374151;
-        }
-
-        .secondary:hover {
-            background: #1f2937;
-        }
-
-        @media (max-width: 620px) {
-            .topbar {
-                align-items: flex-start;
-                flex-direction: column;
-            }
-
-            .actions button {
-                width: 100%;
-            }
-        }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="topbar">
-            <h1>Pengaturan Router</h1>
-            <div class="account">
-                <?= htmlspecialchars($_SESSION['username'], ENT_QUOTES, 'UTF-8') ?>
-                <a class="logout" href="pppoe.php">PPPoE</a>
-                <a class="logout" href="olt_monitor.php">OLT</a>
-                <a class="logout" href="../logout.php">Logout</a>
-            </div>
-        </div>
-    </header>
-
-    <main>
+<style>
+.panel { padding: 28px; background: var(--clr-surface); border: 1px solid var(--clr-border); border-radius: var(--radius); box-shadow: var(--shadow); max-width: 720px; }
+.actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.secondary { background: rgba(255,255,255,0.08) !important; border: 1px solid var(--clr-border) !important; }
+.info { background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.25); color: #93c5fd; border-radius: 8px; padding: 12px 16px; font-size: 13px; margin-bottom: 18px; }
+</style>
+<div class="page-wrap">
+<p class="page-heading">Pengaturan Router</p>
+<p class="page-sub">Konfigurasi koneksi API MikroTik untuk manajemen router.</p>
         <section class="panel">
+
             <?php if ($message !== ''): ?>
                 <div class="alert success"><?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?></div>
             <?php endif; ?>
@@ -386,6 +229,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 </div>
             </form>
         </section>
-    </main>
+</div>
 </body>
 </html>

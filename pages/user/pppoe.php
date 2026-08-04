@@ -59,216 +59,156 @@ if ($search !== '') {
         return str_contains(strtolower($haystack), $keyword);
     }));
 }
+
+$pageTitle  = 'PPPoE Active';
+$activePage = 'pppoe';
+require_once __DIR__ . '/partials/header.php';
 ?>
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PPPoE Active - NetPoe Remote</title>
-    <style>
-        * {
-            box-sizing: border-box;
-        }
+<style>
+/* ── Panel & layout ── */
+.panel { padding: 24px; background: var(--clr-surface); border: 1px solid var(--clr-border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.panel h2 { font-size:16px; margin-bottom:16px; }
+.search-box { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+.search-box input { flex: 1; min-width: 200px; margin-bottom: 0; }
+.result-count { color: var(--clr-muted); font-size: 14px; }
+.search-button { flex-shrink: 0; }
+.table-wrap { overflow-x: auto; }
+.remote-link {
+    display:inline-flex; align-items:center; padding:6px 12px; border-radius:7px;
+    background:linear-gradient(135deg,#6366f1,#8b5cf6); color:#fff; font-weight:700;
+    text-decoration:none; font-size:12px; white-space:nowrap;
+}
+.btn-signal {
+    display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:7px;
+    background: rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.35);
+    color:#4ade80; font-weight:700; font-size:12px; cursor:pointer;
+    font-family:inherit; white-space:nowrap; transition: background .15s, transform .12s;
+}
+.btn-signal:hover { background: rgba(16,185,129,0.25); transform:translateY(-1px); }
+.empty { color: var(--clr-muted); text-align: center; }
+.aksi-cell { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
 
-        body {
-            margin: 0;
-            font-family: Arial, sans-serif;
-            background: #f4f6f8;
-            color: #1f2937;
-        }
+/* ── Modal overlay ── */
+.modal-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(6px);
+    z-index: 999;
+    align-items: center;
+    justify-content: center;
+}
+.modal-overlay.active { display: flex; }
 
-        header {
-            background: #ffffff;
-            border-bottom: 1px solid #e5e7eb;
-        }
+.modal-box {
+    background: #1a1d2e;
+    border: 1px solid rgba(99,102,241,0.3);
+    border-radius: 20px;
+    padding: 32px 28px;
+    width: min(100% - 32px, 480px);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    position: relative;
+    animation: modalIn .22s ease;
+}
 
-        .topbar,
-        main {
-            width: min(100% - 32px, 1120px);
-            margin: 0 auto;
-        }
+@keyframes modalIn {
+    from { transform: scale(.92) translateY(20px); opacity: 0; }
+    to   { transform: scale(1) translateY(0); opacity: 1; }
+}
 
-        .topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 16px;
-            padding: 18px 0;
-        }
+.modal-close {
+    position: absolute; top: 16px; right: 18px;
+    background: none; border: none;
+    color: #64748b; font-size: 22px; cursor: pointer; line-height: 1;
+    transition: color .15s;
+}
+.modal-close:hover { color: #e2e8f0; }
 
-        h1 {
-            margin: 0;
-            font-size: 24px;
-            line-height: 1.2;
-        }
+.modal-header { margin-bottom: 24px; }
+.modal-header h2 { font-size: 18px; font-weight: 800; margin-bottom: 4px; color: #e2e8f0; }
+.modal-header .modal-sub { font-size: 13px; color: #64748b; }
 
-        .nav a {
-            margin-left: 12px;
-            color: #2563eb;
-            font-weight: 700;
-            text-decoration: none;
-            font-size: 14px;
-        }
+.modal-meta {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 10px; margin-bottom: 22px;
+}
+.meta-box {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; padding: 12px 14px;
+}
+.meta-box .lbl { font-size: 11px; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; margin-bottom: 3px; }
+.meta-box .val { font-size: 14px; color: #cbd5e1; font-weight: 600; }
 
-        main {
-            padding: 28px 0;
-        }
+/* ── Signal meters ── */
+.signal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 22px; }
 
-        .panel {
-            padding: 22px;
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
-        }
+.signal-card {
+    border-radius: 14px;
+    padding: 20px 16px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+}
+.signal-card::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at 50% 0%, var(--glow,rgba(99,102,241,.25)), transparent 70%);
+}
+.signal-card .sig-type { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; opacity: .7; margin-bottom: 8px; }
+.signal-card .sig-val  { font-size: 32px; font-weight: 900; letter-spacing: -1px; margin-bottom: 6px; }
+.signal-card .sig-unit { font-size: 13px; opacity: .6; margin-bottom: 10px; }
+.signal-card .sig-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 700;
+    background: rgba(255,255,255,0.1);
+}
 
-        .alert {
-            margin-bottom: 18px;
-            padding: 11px 12px;
-            border: 1px solid #fecaca;
-            border-radius: 6px;
-            background: #fef2f2;
-            color: #991b1b;
-            font-size: 14px;
-        }
+.sig-tx { background: linear-gradient(145deg, rgba(99,102,241,0.2), rgba(99,102,241,0.08)); border: 1px solid rgba(99,102,241,0.3); --glow: rgba(99,102,241,0.3); }
+.sig-rx { background: linear-gradient(145deg, rgba(16,185,129,0.2), rgba(16,185,129,0.08)); border: 1px solid rgba(16,185,129,0.3); --glow: rgba(16,185,129,0.3); }
 
-        .toolbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 14px;
-            margin-bottom: 18px;
-            flex-wrap: wrap;
-        }
+/* ── Loading state ── */
+.modal-loading {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 40px 20px; gap: 16px;
+}
+.spinner {
+    width: 44px; height: 44px;
+    border: 3px solid rgba(99,102,241,0.2);
+    border-top-color: #6366f1;
+    border-radius: 50%;
+    animation: spin .75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner-text { font-size: 14px; color: #64748b; }
 
-        .search-box {
-            width: min(100%, 360px);
-        }
+/* ── Error state ── */
+.modal-error {
+    text-align: center; padding: 30px 10px;
+    display: none;
+}
+.modal-error .err-icon { font-size: 42px; margin-bottom: 14px; }
+.modal-error p { font-size: 14px; color: #f87171; line-height: 1.6; }
 
-        .search-box label {
-            display: block;
-            margin-bottom: 7px;
-            color: #374151;
-            font-weight: 700;
-            font-size: 14px;
-        }
+/* ── Command info ── */
+.cmd-info {
+    background: rgba(0,0,0,0.2);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #475569;
+}
+.cmd-info code { color: #a5b4fc; font-size: 11px; }
+</style>
 
-        .search-box input {
-            width: 100%;
-            padding: 11px 12px;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 14px;
-        }
+<div class="page-wrap">
+<p class="page-heading">PPPoE Client Active</p>
+<p class="page-sub">Daftar klien PPPoE yang sedang aktif di Router MikroTik.</p>
+    <section class="panel">
 
-        .search-box input:focus {
-            outline: none;
-            border-color: #2563eb;
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
-        }
-
-        .result-count {
-            color: #6b7280;
-            font-size: 14px;
-        }
-
-        .search-button {
-            align-self: end;
-            padding: 11px 14px;
-            border: 0;
-            border-radius: 6px;
-            background: #2563eb;
-            color: #ffffff;
-            font-weight: 700;
-            cursor: pointer;
-        }
-
-        .search-button:hover {
-            background: #1d4ed8;
-        }
-
-        .table-wrap {
-            overflow-x: auto;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        th,
-        td {
-            padding: 12px 13px;
-            border-bottom: 1px solid #e5e7eb;
-            text-align: left;
-            font-size: 14px;
-            vertical-align: middle;
-        }
-
-        th {
-            background: #f9fafb;
-            color: #374151;
-        }
-
-        tr:last-child td {
-            border-bottom: 0;
-        }
-
-        .remote-link {
-            display: inline-block;
-            padding: 9px 11px;
-            border-radius: 6px;
-            background: #2563eb;
-            color: #ffffff;
-            font-weight: 700;
-            text-decoration: none;
-            white-space: nowrap;
-        }
-
-        .remote-link:hover {
-            background: #1d4ed8;
-        }
-
-        .empty {
-            color: #6b7280;
-            text-align: center;
-        }
-
-        @media (max-width: 760px) {
-            .topbar {
-                align-items: flex-start;
-                flex-direction: column;
-            }
-
-            .nav a {
-                display: inline-block;
-                margin: 0 12px 8px 0;
-            }
-
-            .search-box {
-                width: 100%;
-            }
-        }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="topbar">
-            <h1>PPPoE Client Active</h1>
-            <nav class="nav">
-                <a href="dashboard.php">Dashboard</a>
-                <a href="router_setting.php">Router</a>
-                <a href="olt_monitor.php">OLT</a>
-                <a href="../logout.php">Logout</a>
-            </nav>
-        </div>
-    </header>
-
-    <main>
-        <section class="panel">
             <?php if ($error !== ''): ?>
-                <div class="alert"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
+                <div class="alert alert-error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
             <?php endif; ?>
 
             <form class="toolbar" method="get" action="">
@@ -283,7 +223,7 @@ if ($search !== '') {
                         autocomplete="off"
                     >
                 </div>
-                <button class="search-button" type="submit">Cari</button>
+                <button class="search-button btn btn-primary" type="submit">🔍 Cari</button>
                 <div class="result-count" id="pppoe-result-count">
                     Total: <?= count($activeClients) ?> client
                 </div>
@@ -309,24 +249,32 @@ if ($search !== '') {
                         <?php endif; ?>
 
                         <?php foreach ($activeClients as $client): ?>
-                            <?php $clientIp = $client['address'] ?? ''; ?>
+                            <?php $clientIp   = $client['address'] ?? ''; ?>
+                            <?php $clientName = $client['name'] ?? ''; ?>
                             <tr class="pppoe-row">
-                                <td><?= htmlspecialchars($client['name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars($clientName ?: '-', ENT_QUOTES, 'UTF-8') ?></td>
                                 <td><?= htmlspecialchars($client['service'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                                 <td><?= htmlspecialchars($client['caller-id'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                                 <td><?= htmlspecialchars($clientIp !== '' ? $clientIp : '-', ENT_QUOTES, 'UTF-8') ?></td>
                                 <td><?= htmlspecialchars($client['uptime'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                                 <td>
-                                    <?php if ($clientIp !== ''): ?>
-                                        <a
-                                            class="remote-link"
-                                            href="remote_action.php?ip=<?= urlencode($clientIp) ?>"
-                                            target="_blank"
-                                            rel="noopener"
-                                        >🔗 Remote Modem</a>
-                                    <?php else: ?>
-                                        -
-                                    <?php endif; ?>
+                                    <div class="aksi-cell">
+                                        <?php if ($clientIp !== ''): ?>
+                                            <a
+                                                class="remote-link"
+                                                href="remote_action.php?ip=<?= urlencode($clientIp) ?>"
+                                                target="_blank"
+                                                rel="noopener"
+                                            >🔗 Remote</a>
+                                        <?php endif; ?>
+                                        <?php if ($clientName !== ''): ?>
+                                            <button
+                                                class="btn-signal"
+                                                onclick="openSignalModal(<?= htmlspecialchars(json_encode($clientName), ENT_QUOTES, 'UTF-8') ?>)"
+                                                title="Cek sinyal optik OLT"
+                                            >📶 Cek Signal</button>
+                                        <?php endif; ?>
+                                    </div>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -337,34 +285,181 @@ if ($search !== '') {
                 </table>
             </div>
         </section>
-    </main>
-    <script>
-        const searchInput = document.getElementById('pppoe-search');
-        const rows = Array.from(document.querySelectorAll('.pppoe-row'));
-        const emptyRow = document.getElementById('search-empty-row');
-        const resultCount = document.getElementById('pppoe-result-count');
+</div>
 
-        function filterPppoeRows() {
-            const keyword = searchInput.value.trim().toLowerCase();
-            let visibleCount = 0;
+<!-- ══════════════════════════════════════════════
+     SIGNAL MODAL
+══════════════════════════════════════════════ -->
+<div class="modal-overlay" id="signalModal" onclick="closeModalOnBg(event)">
+    <div class="modal-box">
+        <button class="modal-close" onclick="closeSignalModal()">✕</button>
 
-            rows.forEach((row) => {
-                const isMatch = row.textContent.toLowerCase().includes(keyword);
-                row.style.display = isMatch ? '' : 'none';
+        <!-- Loading state -->
+        <div class="modal-loading" id="modalLoading">
+            <div class="spinner"></div>
+            <span class="spinner-text">Menghubungi OLT…</span>
+        </div>
 
-                if (isMatch) {
-                    visibleCount += 1;
-                }
-            });
+        <!-- Error state -->
+        <div class="modal-error" id="modalError">
+            <div class="err-icon">⚠️</div>
+            <p id="modalErrorText"></p>
+        </div>
 
-            if (emptyRow) {
-                emptyRow.style.display = rows.length > 0 && visibleCount === 0 ? '' : 'none';
-            }
+        <!-- Result state -->
+        <div id="modalResult" style="display:none">
+            <div class="modal-header">
+                <h2 id="modalTitle">Kualitas Sinyal OLT</h2>
+                <div class="modal-sub" id="modalSub"></div>
+            </div>
 
-            resultCount.textContent = `Total: ${visibleCount} client`;
+            <div class="modal-meta">
+                <div class="meta-box">
+                    <div class="lbl">PPPoE Name</div>
+                    <div class="val" id="rPppoeName">—</div>
+                </div>
+                <div class="meta-box">
+                    <div class="lbl">PON/ONU</div>
+                    <div class="val" id="rPonOnu">—</div>
+                </div>
+                <div class="meta-box">
+                    <div class="lbl">OLT</div>
+                    <div class="val" id="rOltName">—</div>
+                </div>
+                <div class="meta-box">
+                    <div class="lbl">Pelanggan</div>
+                    <div class="val" id="rCustomer">—</div>
+                </div>
+            </div>
+
+            <div class="signal-grid">
+                <!-- TX Card -->
+                <div class="signal-card sig-tx">
+                    <div class="sig-type">TX Power</div>
+                    <div class="sig-val" id="rTxVal">—</div>
+                    <div class="sig-unit">dBm</div>
+                    <div class="sig-badge" id="rTxBadge">—</div>
+                </div>
+                <!-- RX Card -->
+                <div class="signal-card sig-rx">
+                    <div class="sig-type">RX Power</div>
+                    <div class="sig-val" id="rRxVal">—</div>
+                    <div class="sig-unit">dBm</div>
+                    <div class="sig-badge" id="rRxBadge">—</div>
+                </div>
+            </div>
+
+            <div class="cmd-info">
+                Command: <code id="rCmd">—</code>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    /* ─── Live search ─────────────────────────────────────── */
+    const searchInput = document.getElementById('pppoe-search');
+    const rows = Array.from(document.querySelectorAll('.pppoe-row'));
+    const emptyRow = document.getElementById('search-empty-row');
+    const resultCount = document.getElementById('pppoe-result-count');
+
+    function filterPppoeRows() {
+        const keyword = searchInput.value.trim().toLowerCase();
+        let visibleCount = 0;
+
+        rows.forEach((row) => {
+            const isMatch = row.textContent.toLowerCase().includes(keyword);
+            row.style.display = isMatch ? '' : 'none';
+            if (isMatch) visibleCount += 1;
+        });
+
+        if (emptyRow) {
+            emptyRow.style.display = rows.length > 0 && visibleCount === 0 ? '' : 'none';
         }
+        resultCount.textContent = `Total: ${visibleCount} client`;
+    }
 
-        searchInput.addEventListener('input', filterPppoeRows);
-    </script>
+    searchInput.addEventListener('input', filterPppoeRows);
+
+    /* ─── Signal Modal ────────────────────────────────────── */
+    const modal      = document.getElementById('signalModal');
+    const elLoading  = document.getElementById('modalLoading');
+    const elError    = document.getElementById('modalError');
+    const elErrorTxt = document.getElementById('modalErrorText');
+    const elResult   = document.getElementById('modalResult');
+
+    function showLoading() {
+        elLoading.style.display = 'flex';
+        elError.style.display   = 'none';
+        elResult.style.display  = 'none';
+    }
+
+    function showError(msg) {
+        elLoading.style.display = 'none';
+        elError.style.display   = 'block';
+        elResult.style.display  = 'none';
+        elErrorTxt.textContent  = msg;
+    }
+
+    function showResult(d) {
+        elLoading.style.display = 'none';
+        elError.style.display   = 'none';
+        elResult.style.display  = 'block';
+
+        document.getElementById('rPppoeName').textContent = d.pppoe_name || '—';
+        document.getElementById('rPonOnu').textContent    = d.pon_onu    || '—';
+        document.getElementById('rOltName').textContent   = d.olt_name   || '—';
+        document.getElementById('rCustomer').textContent  = d.customer_name || '-';
+        document.getElementById('rCmd').textContent       = d.command_used || '—';
+        document.getElementById('modalSub').textContent   = d.brand + ' ' + d.model;
+
+        // TX
+        const txVal = d.tx !== null ? d.tx.toFixed(2) : '—';
+        document.getElementById('rTxVal').textContent    = txVal;
+        document.getElementById('rTxBadge').textContent  = (d.tx_cat.emoji + ' ' + d.tx_cat.label);
+        document.getElementById('rTxBadge').style.color  = d.tx_cat.color;
+        document.getElementById('rTxVal').style.color    = d.tx_cat.color;
+
+        // RX
+        const rxVal = d.rx !== null ? d.rx.toFixed(2) : '—';
+        document.getElementById('rRxVal').textContent    = rxVal;
+        document.getElementById('rRxBadge').textContent  = (d.rx_cat.emoji + ' ' + d.rx_cat.label);
+        document.getElementById('rRxBadge').style.color  = d.rx_cat.color;
+        document.getElementById('rRxVal').style.color    = d.rx_cat.color;
+    }
+
+    async function openSignalModal(pppoeName) {
+        modal.classList.add('active');
+        document.body.style.overflow = 'hidden';
+        showLoading();
+
+        try {
+            const url = `signal_check.php?pppoe=${encodeURIComponent(pppoeName)}`;
+            const res = await fetch(url);
+            const data = await res.json();
+
+            if (!data.ok) {
+                showError(data.error || 'Terjadi kesalahan tidak diketahui.');
+            } else {
+                showResult(data);
+            }
+        } catch (err) {
+            showError('Gagal menghubungi server: ' + err.message);
+        }
+    }
+
+    function closeSignalModal() {
+        modal.classList.remove('active');
+        document.body.style.overflow = '';
+    }
+
+    function closeModalOnBg(e) {
+        if (e.target === modal) closeSignalModal();
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeSignalModal();
+    });
+</script>
 </body>
 </html>
