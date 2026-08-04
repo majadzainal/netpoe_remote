@@ -29,7 +29,7 @@ final class OltTelnet
             return '';
         }
 
-        stream_set_timeout($socket, 30);
+        stream_set_timeout($socket, $timeout);
 
         try {
             $output = $this->readUntil($socket, ['login:', 'username:', 'user name:', 'user:', 'name:'], $timeout);
@@ -68,7 +68,7 @@ final class OltTelnet
             return '';
         }
 
-        stream_set_timeout($socket, 30);
+        stream_set_timeout($socket, $timeout);
 
         try {
             $output = $this->readUntil($socket, ['login:', 'username:', 'user name:', 'user:', 'name:'], $timeout);

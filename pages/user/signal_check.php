@@ -10,7 +10,8 @@ require_once __DIR__ . '/../../libs/OltProfiles.php';
 checkUser();
 
 header('Content-Type: application/json; charset=UTF-8');
-set_time_limit(30);
+set_time_limit(15);  // max 15 detik total, hindari nginx timeout
+ignore_user_abort(false);
 
 $userId    = (int) $_SESSION['user_id'];
 $pppoeName = trim($_GET['pppoe'] ?? '');
@@ -134,6 +135,18 @@ function scParseFromAllOutput(string $output, string $ponOnu): array
     return ['tx' => null, 'rx' => null, 'found' => false];
 }
 
+// ── Pre-check: coba connect TCP dulu (timeout 5 detik) ────────────────────
+$preSocket = @fsockopen($olt['ip_address'], (int) $olt['telnet_port'], $preErrno, $preErrStr, 5);
+if (!is_resource($preSocket)) {
+    $errMsg = $preErrStr ?: 'Connection refused';
+    echo json_encode([
+        'ok'    => false,
+        'error' => "Gagal terhubung ke OLT ({$olt['ip_address']}:{$olt['telnet_port']}): {$errMsg}. Pastikan OLT online dan port telnet terbuka.",
+    ]);
+    exit;
+}
+fclose($preSocket);
+
 // ── Ambil optical power dari OLT ──────────────────────────────────────────
 $telnet  = new OltTelnet();
 $tx      = null;
@@ -150,7 +163,7 @@ try {
             $olt['telnet_user'],
             $olt['telnet_pass'],
             ['enable', 'configure', 'show ont-optical all'],
-            20
+            10   // timeout 10s per step
         );
         $cmdUsed = 'enable → configure → show ont-optical all';
 
@@ -186,7 +199,7 @@ try {
                 $olt['telnet_user'],
                 $olt['telnet_pass'],
                 $seq,
-                12
+                8   // timeout 8s per step
             );
             $cmdUsed = $cmd;
             if (scIsUseful($rawOut)) {
