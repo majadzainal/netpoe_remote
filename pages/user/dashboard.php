@@ -70,6 +70,8 @@ checkUser();
         <p>Selamat datang, <?= htmlspecialchars($_SESSION['username'], ENT_QUOTES, 'UTF-8') ?>.</p>
         <a href="pppoe.php">PPPoE Active</a>
         <a href="router_setting.php">Pengaturan Router</a>
+        <a href="olt_monitor.php">Monitoring OLT</a>
+        <a href="olt_setting.php">Pengaturan OLT</a>
         <a class="logout" href="../logout.php">Logout</a>
     </main>
 </body>

@@ -259,6 +259,7 @@ if ($search !== '') {
             <nav class="nav">
                 <a href="dashboard.php">Dashboard</a>
                 <a href="router_setting.php">Router</a>
+                <a href="olt_monitor.php">OLT</a>
                 <a href="../logout.php">Logout</a>
             </nav>
         </div>

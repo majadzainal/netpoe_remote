@@ -30,3 +30,43 @@ CREATE TABLE IF NOT EXISTS routers (
     ON UPDATE CASCADE,
   INDEX idx_routers_user_id (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS olts (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  brand VARCHAR(100) NOT NULL,
+  model VARCHAR(100) NOT NULL,
+  olt_name VARCHAR(100) NOT NULL,
+  ip_address VARCHAR(45) NOT NULL,
+  telnet_user VARCHAR(100) NOT NULL,
+  telnet_pass VARCHAR(255) NOT NULL,
+  telnet_port SMALLINT UNSIGNED NOT NULL DEFAULT 23,
+  optical_command VARCHAR(255) NOT NULL,
+  onu_list_command VARCHAR(255) NOT NULL DEFAULT 'show onu all',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_olts_user
+    FOREIGN KEY (user_id) REFERENCES users(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+  INDEX idx_olts_user_id (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS olt_pppoe_mappings (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  olt_id INT UNSIGNED NOT NULL,
+  pppoe_name VARCHAR(100) NOT NULL,
+  pon_onu VARCHAR(100) NOT NULL,
+  customer_name VARCHAR(100) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_olt_pppoe_mappings_user
+    FOREIGN KEY (user_id) REFERENCES users(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+  CONSTRAINT fk_olt_pppoe_mappings_olt
+    FOREIGN KEY (olt_id) REFERENCES olts(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+  UNIQUE KEY uniq_mapping_user_pppoe (user_id, pppoe_name),
+  INDEX idx_mapping_olt_id (olt_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

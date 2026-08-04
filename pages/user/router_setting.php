@@ -287,6 +287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="account">
                 <?= htmlspecialchars($_SESSION['username'], ENT_QUOTES, 'UTF-8') ?>
                 <a class="logout" href="pppoe.php">PPPoE</a>
+                <a class="logout" href="olt_monitor.php">OLT</a>
                 <a class="logout" href="../logout.php">Logout</a>
             </div>
         </div>

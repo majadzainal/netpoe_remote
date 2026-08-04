@@ -1,0 +1,55 @@
+{
+  "profiles": [
+    {
+      "brand": "Hioso",
+      "model": "4P1GM DC Turbo",
+      "label": "Hioso 4PON - 4P1GM DC Turbo",
+      "commands": {
+        "test": "show version",
+        "onu_list": [
+          "enable | show onu optical-ddm epon 0/1",
+          "enable | show onu optical-ddm epon 0/2",
+          "enable | show onu optical-ddm epon 0/3",
+          "enable | show onu optical-ddm epon 0/4",
+          "enable | show onu",
+          "enable | show onu info",
+          "enable | show epon onu",
+          "enable | show epon onu-information"
+        ],
+        "optical_power": [
+          "enable | show onu optical-ddm epon {pon_onu}"
+        ],
+        "help": [
+          "?",
+          "show ?",
+          "show onu ?",
+          "show epon ?",
+          "show interface ?"
+        ]
+      },
+      "pon_onu_placeholder": "contoh: 1/1:1 atau ONU ID sesuai output list ONU"
+    },
+    {
+      "brand": "ZTE",
+      "model": "C320",
+      "label": "ZTE C320",
+      "commands": {
+        "test": "show version",
+        "onu_list": "show gpon onu state",
+        "optical_power": "show pon power {pon_onu}"
+      },
+      "pon_onu_placeholder": "contoh: gpon-onu_1/1/1:12"
+    },
+    {
+      "brand": "Huawei",
+      "model": "MA5608T",
+      "label": "Huawei MA5608T",
+      "commands": {
+        "test": "display version",
+        "onu_list": "display ont info summary 0",
+        "optical_power": "display ont optical-info {pon_onu}"
+      },
+      "pon_onu_placeholder": "contoh: 0/1 12"
+    }
+  ]
+}
