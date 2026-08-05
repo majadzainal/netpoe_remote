@@ -836,7 +836,7 @@ canvas { border-radius: 8px; }
                             <?php foreach ($onuRows as $onuRow): ?>
                                 <tr>
                                     <td><code><?= htmlspecialchars($onuRow['pon_onu'], ENT_QUOTES, 'UTF-8') ?></code></td>
-                                    <td><?= htmlspecialchars($onuRow['mac'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
+                                    <td><?= htmlspecialchars(mb_strtoupper($onuRow['mac'] ?? '', 'UTF-8'), ENT_QUOTES, 'UTF-8') ?></td>
                                     <td style="color: <?= ($onuRow['status'] ?? '') !== '' && str_starts_with($onuRow['status'], 'Up') ? '#166534' : '#991b1b' ?>; font-weight:700"><?= htmlspecialchars($onuRow['status'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                                     <td><?= htmlspecialchars($onuRow['uptime'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                                     <td><?= htmlspecialchars($onuRow['name'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
@@ -955,6 +955,7 @@ canvas { border-radius: 8px; }
 </div>
 </body>
 </html>
+
 
 
 
