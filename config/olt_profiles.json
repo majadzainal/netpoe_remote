@@ -1,72 +1,91 @@
 {
-  "profiles": [
-    {
-      "brand": "Hioso",
-      "model": "4P1GM DC Turbo",
-      "label": "Hioso 4PON - 4P1GM DC Turbo",
-      "commands": {
-        "test": "show version",
-        "onu_list": [
-          "enable | show onu optical-ddm epon 0/1",
-          "enable | show onu optical-ddm epon 0/2",
-          "enable | show onu optical-ddm epon 0/3",
-          "enable | show onu optical-ddm epon 0/4",
-          "enable | show onu",
-          "enable | show onu info",
-          "enable | show epon onu",
-          "enable | show epon onu-information"
-        ],
-        "optical_power": [
-          "enable | show onu optical-ddm epon {pon_onu}"
-        ],
-        "help": [
-          "?",
-          "show ?",
-          "show onu ?",
-          "show epon ?",
-          "show interface ?"
-        ]
-      },
-      "pon_onu_placeholder": "contoh: 1/1:1 atau ONU ID sesuai output list ONU"
-    },
-    {
-      "brand": "HSGQ",
-      "model": "G02",
-      "label": "HSGQ G02 (2 PON GPON)",
-      "pon_port_count_default": 2,
-      "commands": {
-        "test": "enable | show version",
-        "onu_list": "enable | configure | show ont-optical all",
-        "optical_power": "enable | configure | show ont-optical {pon_onu}",
-        "help": [
-          "enable | ?",
-          "enable | configure | ?",
-          "enable | configure | show ?"
-        ]
-      },
-      "pon_onu_placeholder": "contoh: 1/0 atau 1/5 (format PON/ONU)"
-    },
-    {
-      "brand": "ZTE",
-      "model": "C320",
-      "label": "ZTE C320",
-      "commands": {
-        "test": "show version",
-        "onu_list": "show gpon onu state",
-        "optical_power": "show pon power {pon_onu}"
-      },
-      "pon_onu_placeholder": "contoh: gpon-onu_1/1/1:12"
-    },
-    {
-      "brand": "Huawei",
-      "model": "MA5608T",
-      "label": "Huawei MA5608T",
-      "commands": {
-        "test": "display version",
-        "onu_list": "display ont info summary 0",
-        "optical_power": "display ont optical-info {pon_onu}"
-      },
-      "pon_onu_placeholder": "contoh: 0/1 12"
-    }
-  ]
+    "profiles":  [
+                     {
+                         "brand":  "Hioso",
+                         "model":  "4P1GM DC Turbo",
+                         "label":  "Hioso 4PON - 4P1GM DC Turbo",
+                         "commands":  {
+                                          "test":  "show version",
+                                          "onu_list":  [
+                                                           "enable | show onu optical-ddm epon 0/1",
+                                                           "enable | show onu optical-ddm epon 0/2",
+                                                           "enable | show onu optical-ddm epon 0/3",
+                                                           "enable | show onu optical-ddm epon 0/4",
+                                                           "enable | show onu",
+                                                           "enable | show onu info",
+                                                           "enable | show epon onu",
+                                                           "enable | show epon onu-information"
+                                                       ],
+                                          "optical_power":  [
+                                                                "enable | show onu optical-ddm epon {pon_onu}"
+                                                            ],
+                                          "help":  [
+                                                       "?",
+                                                       "show ?",
+                                                       "show onu ?",
+                                                       "show epon ?",
+                                                       "show interface ?"
+                                                   ]
+                                      },
+                         "pon_onu_placeholder":  "contoh: 1/1:1 atau ONU ID sesuai output list ONU"
+                     },
+                     {
+                         "brand":  "HA7302CST",
+                         "model":  "EPON v7.75",
+                         "label":  "HA7302CST EPON - Software v7.75",
+                         "pon_port_count_default":  2,
+                         "commands":  {
+                                          "test":  "enable | configure terminal | epon | show pon 1/1 link bw",
+                                          "onu_list":  "enable | configure terminal | epon | show pon 1/1 link bw",
+                                          "optical_power":  "enable | configure terminal | epon | show optical-ddm onu {pon_onu}",
+                                          "help":  [
+                                                       "?",
+                                                       "enable | ?",
+                                                       "enable | configure terminal | ?",
+                                                       "enable | configure terminal | epon | show ?",
+                                                       "enable | configure terminal | epon | show pon ?"
+                                                   ]
+                                      },
+                         "pon_onu_placeholder":  "contoh: 0/1/1:1 dari output 1/1_1"
+                     },
+                     {
+                         "brand":  "HSGQ",
+                         "model":  "G02",
+                         "label":  "HSGQ G02 (2 PON GPON)",
+                         "pon_port_count_default":  2,
+                         "commands":  {
+                                          "test":  "enable | show version",
+                                          "onu_list":  "enable | configure | show ont-optical all",
+                                          "optical_power":  "enable | configure | show ont-optical {pon_onu}",
+                                          "help":  [
+                                                       "enable | ?",
+                                                       "enable | configure | ?",
+                                                       "enable | configure | show ?"
+                                                   ]
+                                      },
+                         "pon_onu_placeholder":  "contoh: 1/0 atau 1/5 (format PON/ONU)"
+                     },
+                     {
+                         "brand":  "ZTE",
+                         "model":  "C320",
+                         "label":  "ZTE C320",
+                         "commands":  {
+                                          "test":  "show version",
+                                          "onu_list":  "show gpon onu state",
+                                          "optical_power":  "show pon power {pon_onu}"
+                                      },
+                         "pon_onu_placeholder":  "contoh: gpon-onu_1/1/1:12"
+                     },
+                     {
+                         "brand":  "Huawei",
+                         "model":  "MA5608T",
+                         "label":  "Huawei MA5608T",
+                         "commands":  {
+                                          "test":  "display version",
+                                          "onu_list":  "display ont info summary 0",
+                                          "optical_power":  "display ont optical-info {pon_onu}"
+                                      },
+                         "pon_onu_placeholder":  "contoh: 0/1 12"
+                     }
+                 ]
 }

@@ -171,9 +171,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = 'Pengaturan OLT berhasil disimpan.';
     } elseif ($action === 'test') {
         $telnet = new OltTelnet();
-        $output = $telnet->runCommand($ipAddress, $telnetPortNumber, $telnetUser, $telnetPass, $testCommand, 6);
+        $testCommands = array_values(array_filter(
+            array_map('trim', explode('|', $testCommand)),
+            static fn (string $command): bool => $command !== ''
+        ));
+        $output = $telnet->runCommands($ipAddress, $telnetPortNumber, $telnetUser, $telnetPass, $testCommands, 15);
         $testSuccess = $output !== '';
-        $testMessage = $testSuccess ? 'Koneksi telnet OLT berhasil.' : $telnet->getError();
+        $testMessage = $testSuccess ? 'Koneksi telnet OLT berhasil.' : ($telnet->getError() ?: 'Koneksi telnet OLT gagal tanpa output error.');
     }
 }
 $pageTitle  = 'Pengaturan OLT';
@@ -273,6 +277,7 @@ require_once __DIR__ . '/partials/header.php';
         const modelInput = document.getElementById('model');
         const onuListCommandInput = document.getElementById('onu_list_command');
         const opticalCommandInput = document.getElementById('optical_command');
+        const ponPortCountInput = document.getElementById('pon_port_count');
 
         function applyProfile() {
             const selected = profiles.find((profile) => `${profile.brand}|${profile.model}`.toLowerCase() === profileSelect.value);
@@ -285,6 +290,9 @@ require_once __DIR__ . '/partials/header.php';
             modelInput.value = selected.model;
             onuListCommandInput.value = Array.isArray(selected.commands.onu_list) ? selected.commands.onu_list.join("\n") : (selected.commands.onu_list || '');
             opticalCommandInput.value = Array.isArray(selected.commands.optical_power) ? selected.commands.optical_power.join("\n") : (selected.commands.optical_power || '');
+            if (selected.pon_port_count_default) {
+                ponPortCountInput.value = selected.pon_port_count_default;
+            }
         }
 
         profileSelect.addEventListener('change', applyProfile);

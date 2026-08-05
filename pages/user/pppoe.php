@@ -441,10 +441,19 @@ require_once __DIR__ . '/partials/header.php';
             const url = `signal_check.php?pppoe=${encodeURIComponent(pppoeName)}`;
             const res = await fetch(url, { signal: controller.signal });
             clearTimeout(timeoutId);
-            const data = await res.json();
+            const body = await res.text();
+            let data;
 
-            if (!data.ok) {
-                showError(data.error || 'Terjadi kesalahan tidak diketahui.');
+            try {
+                data = JSON.parse(body);
+            } catch (parseErr) {
+                const detail = body.trim().replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 180);
+                showError(detail || `Server mengembalikan response tidak valid (HTTP ${res.status}).`);
+                return;
+            }
+
+            if (!res.ok || !data.ok) {
+                showError(data.error || `Request gagal (HTTP ${res.status}).`);
             } else {
                 showResult(data);
             }

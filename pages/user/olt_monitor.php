@@ -14,6 +14,8 @@ $message = '';
 $error = '';
 $selectedPppoe = trim($_GET['pppoe'] ?? '');
 $showOnuList = ($_GET['view'] ?? '') === 'onu_list';
+$forceOnuRefresh = isset($_GET['refresh_onu']);
+$onuListFromCache = false;
 $opticalData = null;
 $rawOutput = '';
 $onuListOutput = '';
@@ -91,16 +93,76 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             );
             $stmt->execute([
                 'user_id' => $userId,
-                'olt_id' => (int) $olt['id'],
-                'pppoe_name' => $pppoeName,
-                'pon_onu' => $ponOnu,
+                'olt_id'  => (int) $olt['id'],
+                'pppoe_name'   => $pppoeName,
+                'pon_onu'      => $ponOnu,
                 'customer_name' => $customerName !== '' ? $customerName : null,
             ]);
-            $message = 'Mapping PPPoE ke OLT berhasil disimpan.';
-            $selectedPppoe = $pppoeName;
+            // PRG: redirect agar tidak reload ulang halaman berat
+            header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?') . '?saved=1');
+            exit;
+        }
+    }
+
+    if ($action === 'delete_mapping' && $olt) {
+        $mappingId = (int) ($_POST['mapping_id'] ?? 0);
+        if ($mappingId > 0) {
+            $stmt = $pdo->prepare(
+                'DELETE FROM olt_pppoe_mappings
+                 WHERE id = :id AND user_id = :user_id AND olt_id = :olt_id'
+            );
+            $stmt->execute([
+                'id'      => $mappingId,
+                'user_id' => $userId,
+                'olt_id'  => (int) $olt['id'],
+            ]);
+        }
+        header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?') . '?deleted=1');
+        exit;
+    }
+
+    if ($action === 'update_mapping' && $olt) {
+        $mappingId    = (int) ($_POST['mapping_id'] ?? 0);
+        $pppoeName    = trim($_POST['pppoe_name'] ?? '');
+        $ponOnu       = trim($_POST['pon_onu'] ?? '');
+        $customerName = trim($_POST['customer_name'] ?? '');
+
+        if ($mappingId > 0 && $pppoeName !== '' && $ponOnu !== '') {
+            try {
+                $stmt = $pdo->prepare(
+                    'UPDATE olt_pppoe_mappings
+                     SET pppoe_name = :pppoe_name,
+                         pon_onu = :pon_onu,
+                         customer_name = :customer_name
+                     WHERE id = :id AND user_id = :user_id AND olt_id = :olt_id'
+                );
+                $stmt->execute([
+                    'pppoe_name'    => $pppoeName,
+                    'pon_onu'       => $ponOnu,
+                    'customer_name' => $customerName !== '' ? $customerName : null,
+                    'id'            => $mappingId,
+                    'user_id'       => $userId,
+                    'olt_id'        => (int) $olt['id'],
+                ]);
+                header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?') . '?updated=1');
+                exit;
+            } catch (PDOException $exception) {
+                if ($exception->getCode() === '23000') {
+                    $error = 'PPPoE name sudah dipakai di mapping lain.';
+                } else {
+                    throw $exception;
+                }
+            }
+        } else {
+            $error = 'PPPoE name dan PON/ONU wajib diisi untuk update.';
         }
     }
 }
+
+// Tampilkan pesan dari redirect
+if (isset($_GET['saved']))   $message = 'Mapping PPPoE ke OLT berhasil disimpan.';
+if (isset($_GET['deleted'])) $message = 'Mapping berhasil dihapus.';
+if (isset($_GET['updated'])) $message = 'Mapping berhasil diperbarui.';
 
 $mappings = [];
 if ($olt) {
@@ -236,6 +298,32 @@ function parseOnuList(string $output): array
         }
 
         // ----------------------------------------------------------------
+        // Format HA7302CST EPON: show pon 1/1 link bw
+        // Contoh: 1/1_1 14:6b:9a:80:e9:05 ... 1000000 ...
+        // Mapping optical memakai format: 0/1/1:1
+        // ----------------------------------------------------------------
+        if (preg_match(
+            '/^(\d+)\/(\d+)_(\d+)\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\s+\S+\s+(\d+)\s+\d+\s+\d+\s+(\d+)\b/',
+            $line,
+            $match
+        ) === 1) {
+            $slot = $match[1];
+            $pon  = $match[2];
+            $onu  = $match[3];
+            $upMax = (int) $match[5];
+            $downMax = (int) $match[6];
+
+            $rows[] = [
+                'pon_onu' => '0/' . $slot . '/' . $pon . ':' . $onu,
+                'mac'     => $match[4],
+                'status'  => ($upMax > 0 || $downMax > 0) ? 'Up' : 'Down',
+                'uptime'  => 'UpMax: ' . $upMax . ' | DownMax: ' . $downMax,
+                'name'    => '',
+                'raw'     => $line,
+            ];
+            continue;
+        }
+        // ----------------------------------------------------------------
         // Format HSGQ G02: show ont-optical all
         // Contoh: 1/0 HWTCdf648270 43 C 3.24 V   14.58 mA 1.4840 dBm   -19.4700 dBm 001-03-aina
         // Kolom: PON/ONU  ONT-SN  Temp C  Voltage V  Bias mA  TxPower dBm  RxPower dBm  ONT-Name
@@ -332,6 +420,16 @@ function applyOltCommandMode(array $olt, array $sequence): array
         array_unshift($sequence, 'enable');
     }
 
+    if ($brand === 'ha7302cst') {
+        $prefix = ['enable', 'configure terminal', 'epon'];
+        $existing = array_map('strtolower', $sequence);
+        foreach (array_reverse($prefix) as $command) {
+            if (!in_array(strtolower($command), $existing, true)) {
+                array_unshift($sequence, $command);
+            }
+        }
+    }
+
     return $sequence;
 }
 
@@ -402,6 +500,18 @@ function runAllUsefulOltCommands(OltTelnet $telnet, array $olt, array $commands,
 }
 
 if ($olt && $showOnuList) {
+    $cacheKey = 'onu_list_' . $userId . '_' . (int) $olt['id'];
+    $cachedOnuList = $_SESSION[$cacheKey] ?? null;
+
+    if ($forceOnuRefresh === false
+        && is_array($cachedOnuList)
+        && ($cachedOnuList['expires_at'] ?? 0) >= time()
+    ) {
+        $onuListOutput = (string) ($cachedOnuList['output'] ?? '');
+        $onuListCommandUsed = (string) ($cachedOnuList['command'] ?? 'cache');
+        $onuListFromCache = $onuListOutput !== '';
+    }
+
     $ponPortCount = max(1, (int) ($olt['pon_port_count'] ?? 4));
     $brand        = strtolower((string) ($olt['brand'] ?? ''));
     $telnet       = new OltTelnet();
@@ -409,7 +519,7 @@ if ($olt && $showOnuList) {
     // -------------------------------------------------------------------
     // Hioso EPON: loop per port dengan show onu info epon 0/X all
     // -------------------------------------------------------------------
-    if ($brand === 'hioso') {
+    if ($onuListOutput === '' && $brand === 'hioso') {
         $ponCommands = [];
         for ($port = 1; $port <= $ponPortCount; $port++) {
             $ponCommands[] = "show onu info epon 0/{$port} all";
@@ -432,6 +542,30 @@ if ($olt && $showOnuList) {
     }
 
     // -------------------------------------------------------------------
+    // HA7302CST EPON: loop per PON dengan show pon 1/X link bw
+    // -------------------------------------------------------------------
+    if ($onuListOutput === '' && $brand === 'ha7302cst') {
+        $ponCommands = [];
+        for ($port = 1; $port <= $ponPortCount; $port++) {
+            $ponCommands[] = "show pon 1/{$port} link bw";
+        }
+
+        $sequence = applyOltCommandMode($olt, $ponCommands);
+        $rawAll   = $telnet->runCommands(
+            $olt['ip_address'],
+            (int) $olt['telnet_port'],
+            $olt['telnet_user'],
+            $olt['telnet_pass'],
+            $sequence,
+            15
+        );
+
+        if (isUsefulTelnetOutput($rawAll)) {
+            $onuListOutput      = $rawAll;
+            $onuListCommandUsed = 'show pon 1/1~1/' . $ponPortCount . ' link bw';
+        }
+    }
+    // -------------------------------------------------------------------
     // Brand lain (HSGQ, ZTE, Huawei, dll): gunakan onu_list_command
     // dari pengaturan OLT langsung tanpa mencoba EPON loop
     // -------------------------------------------------------------------
@@ -444,10 +578,18 @@ if ($olt && $showOnuList) {
         );
     }
 
-    if ($onuListOutput === '') {
+    if ($onuListOutput === '' && $onuListFromCache === false) {
         $error = $telnet->getError() ?: 'Tidak ada output list ONU dari OLT.';
     } elseif (!isUsefulTelnetOutput($onuListOutput)) {
         $error = 'Semua kandidat command list ONU gagal. Coba command manual: ?, show ?, show onu ?, lalu update config/olt_profiles.json.';
+    }
+
+    if ($onuListOutput !== '' && $onuListFromCache === false) {
+        $_SESSION[$cacheKey] = [
+            'output' => $onuListOutput,
+            'command' => $onuListCommandUsed,
+            'expires_at' => time() + 60,
+        ];
     }
 }
 
@@ -536,7 +678,7 @@ $activePage = 'olt_monitor';
 require_once __DIR__ . '/partials/header.php';
 ?>
 <style>
-.layout { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+.layout { display: grid; grid-template-columns: 380px 1fr; gap: 18px; align-items: start; }
 .panel { padding: 22px; background: var(--clr-surface); border: 1px solid var(--clr-border); border-radius: var(--radius); box-shadow: var(--shadow); }
 .panel h2 { font-size: 16px; margin-bottom: 16px; color: var(--clr-text); }
 .meta { margin: 0 0 14px; color: var(--clr-muted); font-size: 13px; line-height: 1.6; }
@@ -544,11 +686,33 @@ require_once __DIR__ . '/partials/header.php';
 .metric { padding: 16px; border: 1px solid var(--clr-border); border-radius: 10px; background: rgba(255,255,255,0.04); }
 .metric span { display: block; color: var(--clr-muted); font-size: 13px; }
 .metric strong { display: block; margin-top: 8px; font-size: 24px; color: var(--clr-text); }
-.button { display:inline-flex; align-items:center; padding:9px 16px; border-radius:8px; background:linear-gradient(135deg,#6366f1,#8b5cf6); color:#fff; font-weight:700; text-decoration:none; font-size:13px; }
+.button { display:inline-flex; align-items:center; padding:9px 16px; border-radius:8px; background:linear-gradient(135deg,#6366f1,#8b5cf6); color:#fff; font-weight:700; text-decoration:none; font-size:13px; border:none; cursor:pointer; }
+.btn-sm { padding:5px 10px; font-size:12px; border-radius:6px; }
+.btn-danger { background:linear-gradient(135deg,#ef4444,#b91c1c); }
+.btn-warning { background:linear-gradient(135deg,#f59e0b,#d97706); }
 .inline-form { display: flex; gap: 10px; align-items: end; margin-bottom: 18px; }
 .inline-form > div { flex: 1; }
 .inline-form input { margin-bottom: 0; }
-cavas { border-radius: 8px; }
+canvas { border-radius: 8px; }
+/* Modal edit mapping */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); backdrop-filter:blur(4px); z-index:9999; align-items:center; justify-content:center; }
+.modal-overlay.active { display:flex; }
+.modal-box { background:var(--clr-surface); border:1px solid var(--clr-border); border-radius:14px; padding:28px; width:100%; max-width:400px; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalIn .2s ease; }
+@keyframes modalIn { from { transform:translateY(-20px); opacity:0; } to { transform:translateY(0); opacity:1; } }
+.modal-box h3 { margin:0 0 18px; font-size:16px; color:var(--clr-text); }
+.modal-box .modal-actions { display:flex; gap:10px; margin-top:18px; justify-content:flex-end; }
+.btn-secondary { background:rgba(255,255,255,0.08); color:var(--clr-text); border:1px solid var(--clr-border); }
+.table-scroll { width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; margin-top:18px; }
+.table-scroll table { margin-top:0; }
+.map-table { min-width:620px; table-layout:fixed; }
+.map-table th, .map-table td { vertical-align:middle; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.map-table th:nth-child(1), .map-table td:nth-child(1) { width:28%; }
+.map-table th:nth-child(2), .map-table td:nth-child(2) { width:24%; }
+.map-table th:nth-child(3), .map-table td:nth-child(3) { width:24%; }
+.map-table th:nth-child(4), .map-table td:nth-child(4) { width:118px; overflow:visible; }
+.map-table .actions { display:flex; gap:6px; flex-wrap:nowrap; }
+.map-table .actions form { flex:0 0 auto; }
+.map-table .actions .button { flex:0 0 auto; }
 @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .inline-form { flex-direction: column; } }
 </style>
 <div class="page-wrap">
@@ -573,22 +737,61 @@ cavas { border-radius: 8px; }
                     <button type="submit" class="button" name="action" value="save_mapping">Simpan Mapping</button>
                 </form>
 
-                <table>
-                    <thead><tr><th>PPPoE</th><th>PON/ONU</th><th>Aksi</th></tr></thead>
+                <div class="table-scroll">
+                    <table class="map-table">
+                    <thead><tr><th>PPPoE</th><th>PON/ONU</th><th>Pelanggan</th><th>Aksi</th></tr></thead>
                     <tbody>
                         <?php if ($mappings === []): ?>
-                            <tr><td colspan="3">Belum ada mapping.</td></tr>
+                            <tr><td colspan="4">Belum ada mapping.</td></tr>
                         <?php endif; ?>
                         <?php foreach ($mappings as $mapping): ?>
                             <tr>
                                 <td><?= htmlspecialchars($mapping['pppoe_name'], ENT_QUOTES, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars($mapping['pon_onu'], ENT_QUOTES, 'UTF-8') ?></td>
-                                <td><a class="button" href="?pppoe=<?= urlencode($mapping['pppoe_name']) ?>">Graph</a></td>
+                                <td><code><?= htmlspecialchars($mapping['pon_onu'], ENT_QUOTES, 'UTF-8') ?></code></td>
+                                <td><?= htmlspecialchars($mapping['customer_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                                <td>
+                                    <div class="actions">
+                                        <a class="button btn-sm" href="?pppoe=<?= urlencode($mapping['pppoe_name']) ?>" title="Lihat Graph">&#128202;</a>
+                                        <button type="button" class="button btn-sm btn-warning" title="Edit Mapping"
+                                            onclick="openEditModal(<?= $mapping['id'] ?>, <?= htmlspecialchars(json_encode($mapping['pppoe_name']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($mapping['pon_onu']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($mapping['customer_name'] ?? ''), ENT_QUOTES, 'UTF-8') ?>)">&#9998;</button>
+                                        <form method="post" action="" style="display:inline" onsubmit="return confirm('Hapus mapping <?= htmlspecialchars(addslashes($mapping['pppoe_name']), ENT_QUOTES, 'UTF-8') ?>?')">
+                                            <input type="hidden" name="action" value="delete_mapping">
+                                            <input type="hidden" name="mapping_id" value="<?= $mapping['id'] ?>">
+                                            <button type="submit" class="button btn-sm btn-danger" title="Hapus Mapping">&#128465;</button>
+                                        </form>
+                                    </div>
+                                </td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
-                </table>
+                    </table>
+                </div>
             </section>
+
+            <!-- Modal Edit Mapping -->
+            <div class="modal-overlay" id="editMappingModal">
+                <div class="modal-box">
+                    <h3>&#9998; Edit Mapping PPPoE</h3>
+                    <form method="post" action="" id="editMappingForm">
+                        <input type="hidden" name="action" value="update_mapping">
+                        <input type="hidden" name="mapping_id" id="edit_mapping_id">
+
+                        <label for="edit_pppoe_name">PPPoE Name</label>
+                        <input type="text" id="edit_pppoe_name" name="pppoe_name" required>
+
+                        <label for="edit_pon_onu">PON/ONU</label>
+                        <input type="text" id="edit_pon_onu" name="pon_onu" required placeholder="contoh: 1/1/1:12">
+
+                        <label for="edit_customer_name">Nama Pelanggan</label>
+                        <input type="text" id="edit_customer_name" name="customer_name" placeholder="Opsional">
+
+                        <div class="modal-actions">
+                            <button type="button" class="button btn-secondary" onclick="closeEditModal()">Batal</button>
+                            <button type="submit" class="button">Simpan Perubahan</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
 
             <section class="panel">
                 <h2>Graph Optical Power</h2>
@@ -602,6 +805,7 @@ cavas { border-radius: 8px; }
 
                 <p>
                     <a class="button" href="?view=onu_list">Ambil List ONU</a>
+                    <a class="button btn-secondary" href="?view=onu_list&amp;refresh_onu=1">Refresh dari OLT</a>
                 </p>
 
                 <form class="inline-form" method="get" action="">
@@ -621,7 +825,7 @@ cavas { border-radius: 8px; }
                 <?php if ($onuListOutput !== ''): ?>
                     <h2>List ONU</h2>
                     <?php if ($onuListCommandUsed !== ''): ?>
-                        <p class="meta">Command dipakai: <code><?= htmlspecialchars($onuListCommandUsed, ENT_QUOTES, 'UTF-8') ?></code></p>
+                        <p class="meta">Command dipakai: <code><?= htmlspecialchars($onuListCommandUsed, ENT_QUOTES, 'UTF-8') ?></code><?= $onuListFromCache ? ' <span class="meta">(cache 60 detik)</span>' : '' ?></p>
                     <?php endif; ?>
                     <table>
                         <thead><tr><th>ONU ID</th><th>MAC / Serial</th><th>Status</th><th>Uptime / Optical</th><th>Nama</th></tr></thead>
@@ -675,6 +879,22 @@ cavas { border-radius: 8px; }
 </div>
 
     <script>
+        // ── Modal Edit Mapping ──────────────────────────────────────────
+        function openEditModal(id, pppoeName, ponOnu, customerName) {
+            document.getElementById('edit_mapping_id').value    = id;
+            document.getElementById('edit_pppoe_name').value    = pppoeName;
+            document.getElementById('edit_pon_onu').value       = ponOnu;
+            document.getElementById('edit_customer_name').value = customerName || '';
+            document.getElementById('editMappingModal').classList.add('active');
+        }
+        function closeEditModal() {
+            document.getElementById('editMappingModal').classList.remove('active');
+        }
+        // Tutup modal jika klik overlay
+        document.getElementById('editMappingModal').addEventListener('click', function(e) {
+            if (e.target === this) closeEditModal();
+        });
+        // ── Graph Optical Power ─────────────────────────────────────────
         const tx = <?= json_encode($opticalData['tx'] ?? null) ?>;
         const rx = <?= json_encode($opticalData['rx'] ?? null) ?>;
         const canvas = document.getElementById('opticalChart');
@@ -735,3 +955,9 @@ cavas { border-radius: 8px; }
 </div>
 </body>
 </html>
+
+
+
+
+
+

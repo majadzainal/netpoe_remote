@@ -19,35 +19,7 @@ final class OltTelnet
         string $command,
         int $timeout = 8
     ): string {
-        $this->error = '';
-        $errno = 0;
-        $errstr = '';
-        $socket = @fsockopen($host, $port, $errno, $errstr, $timeout);
-
-        if (!is_resource($socket)) {
-            $this->error = "Gagal konek ke OLT: {$errstr} ({$errno})";
-            return '';
-        }
-
-        stream_set_timeout($socket, $timeout);
-
-        try {
-            $output = $this->readUntil($socket, ['login:', 'username:', 'user name:', 'user:', 'name:'], $timeout);
-            fwrite($socket, $username . "\r\n");
-
-            $output .= $this->readUntil($socket, ['password:'], $timeout);
-            fwrite($socket, $password . "\r\n");
-
-            $output .= $this->readUntilPrompt($socket, $timeout);
-            fwrite($socket, $command . "\r\n");
-
-            $output .= $this->readUntilPrompt($socket, $timeout);
-            fwrite($socket, "exit\r\n");
-        } finally {
-            fclose($socket);
-        }
-
-        return $this->stripAnsiEscapes($this->stripTelnetNegotiation($output));
+        return $this->runCommands($host, $port, $username, $password, [$command], $timeout);
     }
 
     public function runCommands(
@@ -71,23 +43,41 @@ final class OltTelnet
         stream_set_timeout($socket, $timeout);
 
         try {
-            $output = $this->readUntil($socket, ['login:', 'username:', 'user name:', 'user:', 'name:'], $timeout);
+            fwrite($socket, "\r\n");
+            $output = $this->readUntil($socket, ['login:', 'username:', 'user name:', 'user:', 'name:'], min(3, $timeout));
             fwrite($socket, $username . "\r\n");
 
             $output .= $this->readUntil($socket, ['password:'], $timeout);
+            if (!$this->containsAny($output, ['password:'])) {
+                $this->error = 'OLT tidak menampilkan prompt password telnet.';
+                return '';
+            }
+
             fwrite($socket, $password . "\r\n");
 
-            $output .= $this->readUntilPrompt($socket, $timeout);
+            $loginOutput = $this->readUntilPrompt($socket, $timeout, $password);
+            $output .= $loginOutput;
+
+            if (!$this->hasPrompt($loginOutput)) {
+                $this->error = 'Login telnet OLT gagal atau timeout saat menunggu prompt.';
+                return '';
+            }
 
             foreach ($commands as $command) {
-                $command = trim($command);
+                $command = trim((string) $command);
 
                 if ($command === '') {
                     continue;
                 }
 
                 fwrite($socket, $command . "\r\n");
-                $output .= $this->readUntilPrompt($socket, $timeout);
+                $commandOutput = $this->readUntilPrompt($socket, $timeout, $password);
+                $output .= $commandOutput;
+
+                if (!$this->hasPrompt($commandOutput)) {
+                    $this->error = "Command telnet OLT timeout: {$command}";
+                    return '';
+                }
             }
 
             fwrite($socket, "exit\r\n");
@@ -107,13 +97,11 @@ final class OltTelnet
             $chunk = fread($socket, 4096);
 
             if ($chunk !== false && $chunk !== '') {
+                $this->respondTelnetNegotiation($socket, $chunk);
                 $buffer .= $chunk;
-                $lower = strtolower($this->stripTelnetNegotiation($buffer));
 
-                foreach ($needles as $needle) {
-                    if (str_contains($lower, strtolower($needle))) {
-                        return $buffer;
-                    }
+                if ($this->containsAny($buffer, $needles)) {
+                    return $buffer;
                 }
             }
 
@@ -125,21 +113,17 @@ final class OltTelnet
 
     /**
      * Membaca output dari OLT sampai muncul prompt (#/>/$).
-     * Menangani dua jenis pagination OLT:
-     *   - "--More--"                    → kirim spasi (Space)
-     *   - "--- Enter Key To Continue ---" → kirim Enter (\r\n)
-     *
-     * BUG FIX: Deteksi pagination hanya pada CHUNK BARU saja, bukan seluruh
-     * buffer, untuk mencegah infinite loop.
+     * Menangani password tambahan dan pagination OLT.
      *
      * @param resource $socket
      */
-    private function readUntilPrompt($socket, int $timeout): string
+    private function readUntilPrompt($socket, int $timeout, string $password = ''): string
     {
         $buffer        = '';
         $deadline      = time() + $timeout;
         $paginateCount = 0;
-        $maxPaginate   = 300; // batas aman: maksimal 300 halaman per command
+        $maxPaginate   = 300;
+        $sentPostLoginEnter = false;
 
         while (time() <= $deadline && !feof($socket)) {
             $chunk = fread($socket, 4096);
@@ -149,40 +133,53 @@ final class OltTelnet
                 continue;
             }
 
+            $this->respondTelnetNegotiation($socket, $chunk);
             $buffer .= $chunk;
+            $chunkPlain = $this->cleanOutput($chunk);
 
-            // Strip telnet negotiation DAN ANSI escape codes pada chunk baru
-            $chunkPlain = $this->stripAnsiEscapes($this->stripTelnetNegotiation($chunk));
+            if (
+                !$sentPostLoginEnter
+                && preg_match('/Revision\s*:\s*v?7\.75|Chassis\s*:\s*EPON|SN\s*:/i', $this->cleanOutput($buffer)) === 1
+            ) {
+                fwrite($socket, "\r\n");
+                $sentPostLoginEnter = true;
+                $deadline = time() + $timeout;
+                continue;
+            }
 
-            // ------------------------------------------------------------------
-            // Deteksi: "--- Enter Key To Continue ---" → kirim Enter
-            // ------------------------------------------------------------------
+            if ($password !== '' && preg_match('/(?:Access|Enable)?\s*Password\s*:/i', $chunkPlain) === 1) {
+                fwrite($socket, $password . "\r\n");
+                $deadline = time() + $timeout;
+                continue;
+            }
+
+            if (preg_match('/Access\s+Verification/i', $chunkPlain) === 1) {
+                fwrite($socket, "\r\n");
+                $deadline = time() + $timeout;
+                continue;
+            }
+
             if (
                 $paginateCount < $maxPaginate
                 && preg_match('/---\s*Enter\s+Key\s+To\s+Continue\s*---?/i', $chunkPlain) === 1
             ) {
-                fwrite($socket, "\r\n"); // Enter untuk lanjut
+                fwrite($socket, "\r\n");
                 $deadline = time() + $timeout;
                 $paginateCount++;
                 continue;
             }
 
-            // ------------------------------------------------------------------
-            // Deteksi: "--More--" → kirim spasi
-            // ------------------------------------------------------------------
             if (
                 $paginateCount < $maxPaginate
                 && preg_match('/--[Mm]ore--|---\s*[Mm]ore\s*---/', $chunkPlain) === 1
             ) {
-                fwrite($socket, ' '); // spasi untuk lanjut
+                fwrite($socket, ' ');
                 $deadline = time() + $timeout;
                 $paginateCount++;
                 continue;
             }
 
-            // Cek prompt pada seluruh buffer (terstrip ANSI + telnet)
-            $fullPlain = $this->stripAnsiEscapes($this->stripTelnetNegotiation($buffer));
-            if (preg_match('/[#>$]\s*$/', trim($fullPlain)) === 1) {
+            if ($this->hasPrompt($buffer)) {
                 return $buffer;
             }
         }
@@ -190,25 +187,66 @@ final class OltTelnet
         return $buffer;
     }
 
+    private function respondTelnetNegotiation($socket, string $chunk): void
+    {
+        $length = strlen($chunk);
+
+        for ($i = 0; $i < $length - 2; $i++) {
+            if (ord($chunk[$i]) !== 255) {
+                continue;
+            }
+
+            $command = ord($chunk[$i + 1]);
+            $option = $chunk[$i + 2];
+
+            if ($command === 251 || $command === 252) {
+                fwrite($socket, chr(255) . chr(254) . $option);
+                $i += 2;
+                continue;
+            }
+
+            if ($command === 253 || $command === 254) {
+                fwrite($socket, chr(255) . chr(252) . $option);
+                $i += 2;
+            }
+        }
+    }
+    private function containsAny(string $output, array $needles): bool
+    {
+        $lower = strtolower($this->cleanOutput($output));
+
+        foreach ($needles as $needle) {
+            if (str_contains($lower, strtolower((string) $needle))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function hasPrompt(string $output): bool
+    {
+        $plain = trim($this->cleanOutput($output));
+        return preg_match('/(?:^|\R)[\w.-]+(?:\([^)]+\))*\s*[#>$]\s*$/', $plain) === 1
+            || preg_match('/[#>$]\s*$/', $plain) === 1;
+    }
+
+    private function cleanOutput(string $value): string
+    {
+        return $this->stripAnsiEscapes($this->stripTelnetNegotiation($value));
+    }
+
     private function stripTelnetNegotiation(string $value): string
     {
         return preg_replace('/\xFF[\xFB-\xFE]./s', '', $value) ?? $value;
     }
 
-    /**
-     * Strip ANSI/VT100 escape sequences dari output terminal.
-     * Contoh: \x1b[K (erase to EOL), \x1b[2J (clear screen), \x1b[1;32m (warna), dll.
-     */
     private function stripAnsiEscapes(string $value): string
     {
-        // CSI sequences: ESC [ ... (huruf/angka/simbol)
         $value = preg_replace('/\x1b\[[0-9;]*[A-Za-z]/', '', $value) ?? $value;
-        // OSC sequences: ESC ] ... ST
         $value = preg_replace('/\x1b\][^\x07]*\x07/', '', $value) ?? $value;
-        // Escape + single char lainnya
         $value = preg_replace('/\x1b[^[\]@-Z\\-_]/', '', $value) ?? $value;
-        // Backspace chars (0x08) yang OLT kadang kirim
-        $value = preg_replace('/[\x08]+/', '', $value) ?? $value;
+        $value = preg_replace('/[\x00\x08]+/', '', $value) ?? $value;
         return $value;
     }
 }
