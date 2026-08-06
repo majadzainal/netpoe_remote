@@ -772,7 +772,7 @@ canvas { border-radius: 8px; }
 
             <section class="panel">
                 <h2>Data Mapping OLT</h2>
-
+                <div class="table-scroll">
                     <table class="map-table">
                     <thead><tr><th>PPPoE</th><th>PON/ONU</th><th>Pelanggan</th><th>Aksi</th></tr></thead>
                     <tbody>
