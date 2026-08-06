@@ -265,6 +265,10 @@ require_once __DIR__ . '/partials/header.php';
     color: #475569;
 }
 .cmd-info code { color: #a5b4fc; font-size: 11px; }
+
+/* ── Summary Card Filter ── */
+.summary-card { cursor: pointer; transition: all 0.2s; }
+.summary-card:hover { transform: translateY(-3px); filter: brightness(1.2); }
 </style>
 
 <div class="page-wrap">
@@ -277,15 +281,15 @@ require_once __DIR__ . '/partials/header.php';
             <?php endif; ?>
 
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
-                <div style="background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
+                <div class="summary-card" onclick="filterPppoe('all')" style="background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
                     <div style="font-size: 12px; font-weight: 700; color: #c4b5fd; text-transform: uppercase; margin-bottom: 4px;">Total Secret PPPoE</div>
                     <div style="font-size: 28px; font-weight: 800; color: #fff;"><?= $totalSecrets ?></div>
                 </div>
-                <div style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
+                <div class="summary-card" onclick="filterPppoe('active')" style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
                     <div style="font-size: 12px; font-weight: 700; color: #6ee7b7; text-transform: uppercase; margin-bottom: 4px;">PPPoE Active</div>
                     <div style="font-size: 28px; font-weight: 800; color: #fff;"><?= $totalActive ?></div>
                 </div>
-                <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
+                <div class="summary-card" onclick="filterPppoe('offline')" style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
                     <div style="font-size: 12px; font-weight: 700; color: #fca5a5; text-transform: uppercase; margin-bottom: 4px;">PPPoE Offline</div>
                     <div style="font-size: 28px; font-weight: 800; color: #fff;"><?= $totalOffline ?></div>
                 </div>
@@ -331,7 +335,7 @@ require_once __DIR__ . '/partials/header.php';
                             <?php $clientIp   = $client['address'] ?? ''; ?>
                             <?php $clientName = $client['name'] ?? ''; ?>
                             <?php $isOffline = $client['status'] === 'offline'; ?>
-                            <tr class="pppoe-row" <?= $isOffline ? 'style="background: rgba(239,68,68,0.05);"' : '' ?>>
+                            <tr class="pppoe-row" data-status="<?= $isOffline ? 'offline' : 'active' ?>" <?= $isOffline ? 'style="background: rgba(239,68,68,0.05);"' : '' ?>>
                                 <td>
                                     <strong style="color: <?= $isOffline ? '#fca5a5' : '#c4b5fd' ?>;"><?= htmlspecialchars($clientName ?: '-', ENT_QUOTES, 'UTF-8') ?></strong><br>
                                     <span style="font-size: 11px; color: <?= $isOffline ? '#ef4444' : '#4ade80' ?>; font-weight: 600; text-transform: uppercase;"><?= $isOffline ? 'Offline' : 'Active' ?></span>
@@ -578,6 +582,22 @@ require_once __DIR__ . '/partials/header.php';
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeSignalModal();
     });
+
+    function filterPppoe(status) {
+        const rows = document.querySelectorAll('.pppoe-row');
+        let count = 0;
+        rows.forEach(row => {
+            if (row.classList.contains('empty')) return;
+            const rowStatus = row.getAttribute('data-status');
+            if (status === 'all' || rowStatus === status) {
+                row.style.display = '';
+                count++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+        document.getElementById('pppoe-result-count').textContent = 'Menampilkan: ' + count + ' client';
+    }
 </script>
 </body>
 </html>
