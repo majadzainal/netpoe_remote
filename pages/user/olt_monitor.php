@@ -771,21 +771,8 @@ canvas { border-radius: 8px; }
 <div class="layout">
 
             <section class="panel">
-                <h2>Tambah Mapping</h2>
-                <form method="post" action="">
-                    <label for="pppoe_name">PPPoE Name</label>
-                    <input type="text" id="pppoe_name" name="pppoe_name" placeholder="contoh: user-pppoe" required>
+                <h2>Data Mapping OLT</h2>
 
-                    <label for="pon_onu">PON/ONU</label>
-                    <input type="text" id="pon_onu" name="pon_onu" placeholder="contoh: 1/1/1:12 atau gpon-onu_1/1/1:12" required>
-
-                    <label for="customer_name">Nama Pelanggan</label>
-                    <input type="text" id="customer_name" name="customer_name" placeholder="Opsional">
-
-                    <button type="submit" class="button" name="action" value="save_mapping">Simpan Mapping</button>
-                </form>
-
-                <div class="table-scroll">
                     <table class="map-table">
                     <thead><tr><th>PPPoE</th><th>PON/ONU</th><th>Pelanggan</th><th>Aksi</th></tr></thead>
                     <tbody>
@@ -825,13 +812,20 @@ canvas { border-radius: 8px; }
                         <input type="hidden" name="mapping_id" id="edit_mapping_id">
 
                         <label for="edit_pppoe_name">PPPoE Name</label>
-                        <input type="text" id="edit_pppoe_name" name="pppoe_name" required>
+                        <select id="edit_pppoe_name" name="pppoe_name" required>
+                            <!-- Pilihan awal akan di-inject oleh JS -->
+                            <?php foreach ($activeClients as $client): ?>
+                                <option value="<?= htmlspecialchars($client['name'] ?? '', ENT_QUOTES, 'UTF-8') ?>">
+                                    <?= htmlspecialchars(($client['name'] ?? '') . ' (' . ($client['caller-id'] ?? '-') . ')', ENT_QUOTES, 'UTF-8') ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
 
                         <label for="edit_pon_onu">PON/ONU (Last known)</label>
-                        <input type="text" id="edit_pon_onu" name="pon_onu" required placeholder="contoh: 1/1/1:12">
+                        <input type="text" id="edit_pon_onu" name="pon_onu" required placeholder="contoh: 1/1/1:12" readonly style="background: rgba(0,0,0,0.1); cursor: not-allowed;">
 
                         <label for="edit_mac_address">MAC / Serial (Primary)</label>
-                        <input type="text" id="edit_mac_address" name="mac_address" placeholder="MAC atau SN statis">
+                        <input type="text" id="edit_mac_address" name="mac_address" placeholder="MAC atau SN statis" readonly style="background: rgba(0,0,0,0.1); cursor: not-allowed;">
 
                         <label for="edit_customer_name">Nama Pelanggan</label>
                         <input type="text" id="edit_customer_name" name="customer_name" placeholder="Opsional">
@@ -1038,10 +1032,27 @@ canvas { border-radius: 8px; }
         // ── Modal Edit Mapping ──────────────────────────────────────────
         function openEditModal(id, pppoeName, ponOnu, macAddress, customerName) {
             document.getElementById('edit_mapping_id').value    = id;
-            document.getElementById('edit_pppoe_name').value    = pppoeName;
             document.getElementById('edit_pon_onu').value       = ponOnu;
             document.getElementById('edit_mac_address').value   = macAddress || '';
             document.getElementById('edit_customer_name').value = customerName || '';
+            
+            // Handle pppoe_name di dropdown edit
+            const selectEl = document.getElementById('edit_pppoe_name');
+            let optionExists = false;
+            for (let i = 0; i < selectEl.options.length; i++) {
+                if (selectEl.options[i].value === pppoeName) {
+                    optionExists = true;
+                    break;
+                }
+            }
+            if (!optionExists) {
+                const opt = document.createElement('option');
+                opt.value = pppoeName;
+                opt.text = pppoeName + " (Offline/Current)";
+                selectEl.add(opt, selectEl.options[0]);
+            }
+            selectEl.value = pppoeName;
+            
             document.getElementById('editMappingModal').classList.add('active');
         }
         function closeEditModal() {
