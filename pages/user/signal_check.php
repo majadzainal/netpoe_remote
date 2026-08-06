@@ -34,7 +34,7 @@ if (!$olt) {
 
 // ── Cari mapping PPPoE → ONU ──────────────────────────────────────────────
 $stmt = $pdo->prepare(
-    'SELECT pppoe_name, pon_onu, customer_name
+    'SELECT pppoe_name, pon_onu, mac_address, customer_name
      FROM olt_pppoe_mappings
      WHERE user_id = :uid AND olt_id = :olt_id AND pppoe_name = :pppoe_name
      LIMIT 1'
@@ -147,8 +147,78 @@ if (!is_resource($preSocket)) {
 }
 fclose($preSocket);
 
-// ── Ambil optical power dari OLT ──────────────────────────────────────────
 $telnet  = new OltTelnet();
+
+// ── Resolve MAC Address ke ONU ID terbaru ─────────────────────────────────
+$macAddress = $mapping['mac_address'] ?? '';
+if ($macAddress !== '') {
+    $cacheKey = 'onu_list_' . $userId . '_' . (int) $olt['id'];
+    $cachedOnuList = $_SESSION[$cacheKey] ?? null;
+    $onuListOutput = '';
+
+    if (is_array($cachedOnuList) && ($cachedOnuList['expires_at'] ?? 0) >= time()) {
+        $onuListOutput = (string) ($cachedOnuList['output'] ?? '');
+    } else {
+        // Fetch ONU List
+        $ponPortCount = max(1, (int) ($olt['pon_port_count'] ?? 4));
+        if ($brand === 'hioso') {
+            $ponCommands = [];
+            for ($port = 1; $port <= $ponPortCount; $port++) $ponCommands[] = "show onu info epon 0/{$port} all";
+            $rawAll = $telnet->runCommands($olt['ip_address'], (int) $olt['telnet_port'], $olt['telnet_user'], $olt['telnet_pass'], scApplyMode($olt, $ponCommands), 15);
+            if (scIsUseful($rawAll)) $onuListOutput = $rawAll;
+        } elseif ($brand === 'ha7302cst') {
+            $ponCommands = [];
+            for ($port = 1; $port <= $ponPortCount; $port++) $ponCommands[] = "show pon 1/{$port} link bw";
+            $rawAll = $telnet->runCommands($olt['ip_address'], (int) $olt['telnet_port'], $olt['telnet_user'], $olt['telnet_pass'], scApplyMode($olt, $ponCommands), 15);
+            if (scIsUseful($rawAll)) $onuListOutput = $rawAll;
+        } else {
+            $commands = scSplitCommands($olt['onu_list_command'] ?: 'show onu');
+            $outputs = [];
+            foreach ($commands as $cmd) {
+                $lastOutput = $telnet->runCommands($olt['ip_address'], (int) $olt['telnet_port'], $olt['telnet_user'], $olt['telnet_pass'], scApplyMode($olt, scSplitSequence($cmd)), 15);
+                if (scIsUseful($lastOutput)) $outputs[] = $lastOutput;
+            }
+            if ($outputs !== []) $onuListOutput = implode("\n", $outputs);
+        }
+
+        if ($onuListOutput !== '') {
+            $_SESSION[$cacheKey] = [
+                'output' => $onuListOutput,
+                'expires_at' => time() + 60,
+            ];
+        }
+    }
+
+    if ($onuListOutput !== '') {
+        // Parse ONU list
+        $lines = preg_split('/\R/', $onuListOutput) ?: [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '=') || str_starts_with($line, '-') || preg_match('/^(pon|onu|onuid|index|id|pon\/onu)\b/i', $line) === 1) continue;
+
+            $parsedPon = null;
+            $parsedMac = null;
+
+            if (preg_match('/^(\d+)\/(\d+)_(\d+)\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})/', $line, $match) === 1) {
+                $parsedPon = '0/' . $match[1] . '/' . $match[2] . ':' . $match[3];
+                $parsedMac = $match[4];
+            } elseif (preg_match('/^(\d+\/\d+)\s+(\S+)\s+\d+\s+C\s+[\d.]+\s+V/', $line, $match) === 1) {
+                $parsedPon = $match[1];
+                $parsedMac = $match[2];
+            } elseif (preg_match('/^(\d+\/\d+:\d+)\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})/', $line, $match) === 1) {
+                $parsedPon = str_replace(':', ' ', $match[1]);
+                $parsedMac = $match[2];
+            }
+
+            if ($parsedMac !== null && strcasecmp($parsedMac, $macAddress) === 0) {
+                $ponOnu = $parsedPon; // Override ponOnu from database!
+                break;
+            }
+        }
+    }
+}
+
+// ── Ambil optical power dari OLT ──────────────────────────────────────────
 $tx      = null;
 $rx      = null;
 $cmdUsed = '';

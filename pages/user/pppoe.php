@@ -433,9 +433,9 @@ require_once __DIR__ . '/partials/header.php';
         document.body.style.overflow = 'hidden';
         showLoading();
 
-        // AbortController: batalkan request jika > 20 detik (hindari nginx timeout)
+        // AbortController: batalkan request jika > 35 detik (hindari nginx timeout)
         const controller = new AbortController();
-        const timeoutId  = setTimeout(() => controller.abort(), 20000);
+        const timeoutId  = setTimeout(() => controller.abort(), 35000);
 
         try {
             const url = `signal_check.php?pppoe=${encodeURIComponent(pppoeName)}`;
@@ -460,7 +460,7 @@ require_once __DIR__ . '/partials/header.php';
         } catch (err) {
             clearTimeout(timeoutId);
             if (err.name === 'AbortError') {
-                showError('⏱️ Koneksi ke OLT timeout (>20 detik). OLT tidak merespons atau jaringan lambat. Silakan coba lagi.');
+                showError('⏱️ Koneksi ke OLT timeout (>35 detik). OLT tidak merespons atau jaringan lambat. Silakan coba lagi.');
             } else {
                 showError('Gagal menghubungi server: ' + err.message);
             }
