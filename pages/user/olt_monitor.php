@@ -774,7 +774,7 @@ canvas { border-radius: 8px; }
                 <h2>Data Mapping OLT</h2>
                 <div class="table-scroll">
                     <table class="map-table">
-                    <thead><tr><th>PPPoE</th><th>PON/ONU</th><th>Pelanggan</th><th>Aksi</th></tr></thead>
+                    <thead><tr><th>PPPoE</th><th>Aksi</th><th>PON/ONU</th><th>Pelanggan</th></tr></thead>
                     <tbody>
                         <?php if ($mappings === []): ?>
                             <tr><td colspan="4">Belum ada mapping.</td></tr>
@@ -782,8 +782,6 @@ canvas { border-radius: 8px; }
                         <?php foreach ($mappings as $mapping): ?>
                             <tr>
                                 <td><?= htmlspecialchars($mapping['pppoe_name'], ENT_QUOTES, 'UTF-8') ?></td>
-                                <td><code><?= htmlspecialchars($mapping['pon_onu'], ENT_QUOTES, 'UTF-8') ?></code></td>
-                                <td><?= htmlspecialchars($mapping['customer_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                                 <td>
                                     <div class="actions">
                                         <a class="button btn-sm" href="?pppoe=<?= urlencode($mapping['pppoe_name']) ?>" title="Lihat Graph">&#128202;</a>
@@ -796,6 +794,8 @@ canvas { border-radius: 8px; }
                                         </form>
                                     </div>
                                 </td>
+                                <td><code><?= htmlspecialchars($mapping['pon_onu'], ENT_QUOTES, 'UTF-8') ?></code></td>
+                                <td><?= htmlspecialchars($mapping['customer_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
