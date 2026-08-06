@@ -10,14 +10,26 @@ checkUser();
 
 $userId = (int) $_SESSION['user_id'];
 $error = '';
-$activeClients = [];
 $search = trim($_GET['search'] ?? '');
+$clientsList = [];
+$totalSecrets = 0;
+$totalActive  = 0;
+$totalOffline = 0;
 
-$stmt = $pdo->prepare(
-    'SELECT id, ip_address, api_user, api_pass, api_port FROM routers WHERE user_id = :user_id ORDER BY id ASC LIMIT 1'
-);
+$stmt = $pdo->prepare('SELECT pppoe_name, pon_onu FROM olt_pppoe_mappings WHERE user_id = :user_id');
+$stmt->execute(['user_id' => $userId]);
+$mappings = [];
+foreach ($stmt->fetchAll() as $row) {
+    $mappings[$row['pppoe_name']] = $row['pon_onu'];
+}
+
+$stmt = $pdo->prepare('SELECT id, ip_address, api_user, api_pass, api_port FROM routers WHERE user_id = :user_id ORDER BY id ASC LIMIT 1');
 $stmt->execute(['user_id' => $userId]);
 $router = $stmt->fetch();
+
+function formatUptime(string $uptime): string {
+    return trim(preg_replace('/([A-Za-z]+)/', '$1 ', $uptime));
+}
 
 if (!$router) {
     $error = 'Pengaturan router belum tersedia. Silakan isi pengaturan router terlebih dahulu.';
@@ -27,12 +39,67 @@ if (!$router) {
 
     try {
         if ($api->connect($router['ip_address'], $router['api_user'], $router['api_pass'], (int) $router['api_port'])) {
-            $response = $api->comm('/ppp/active/print');
-
-            foreach ($response as $item) {
-                if (isset($item['!re'])) {
-                    $activeClients[] = $item;
+            $activeRaw = $api->comm('/ppp/active/print');
+            $secretRaw = $api->comm('/ppp/secret/print');
+            
+            $activeMap = [];
+            foreach ($activeRaw as $act) {
+                if (isset($act['!re'])) {
+                    $activeMap[$act['name']] = $act;
                 }
+            }
+
+            foreach ($secretRaw as $sec) {
+                if (!isset($sec['!re'])) continue;
+                $name = $sec['name'] ?? '';
+                if ($name === '') continue;
+                
+                $totalSecrets++;
+                $isActive = isset($activeMap[$name]);
+                $mappedOnu = $mappings[$name] ?? null;
+
+                if ($isActive) {
+                    $totalActive++;
+                    $act = $activeMap[$name];
+                    $clientsList[] = [
+                        'name'    => $name,
+                        'service' => $sec['service'] ?? 'pppoe',
+                        'caller-id' => $act['caller-id'] ?? '-',
+                        'address' => $act['address'] ?? '-',
+                        'uptime'  => formatUptime($act['uptime'] ?? ''),
+                        'last_active' => '-',
+                        'status'  => 'active',
+                        'mapped'  => $mappedOnu
+                    ];
+                    unset($activeMap[$name]);
+                } else {
+                    $totalOffline++;
+                    $clientsList[] = [
+                        'name'    => $name,
+                        'service' => $sec['service'] ?? 'pppoe',
+                        'caller-id' => $sec['caller-id'] ?? '-',
+                        'address' => $sec['remote-address'] ?? '-',
+                        'uptime'  => 'Offline',
+                        'last_active' => $sec['last-logged-out'] ?? '-',
+                        'status'  => 'offline',
+                        'mapped'  => $mappedOnu
+                    ];
+                }
+            }
+            
+            // Any active client that doesn't have a secret
+            foreach ($activeMap as $name => $act) {
+                $totalActive++;
+                $clientsList[] = [
+                    'name'    => $name,
+                    'service' => $act['service'] ?? 'pppoe',
+                    'caller-id' => $act['caller-id'] ?? '-',
+                    'address' => $act['address'] ?? '-',
+                    'uptime'  => formatUptime($act['uptime'] ?? ''),
+                    'last_active' => '-',
+                    'status'  => 'active',
+                    'mapped'  => $mappings[$name] ?? null
+                ];
             }
 
             $api->disconnect();
@@ -47,15 +114,13 @@ if (!$router) {
 
 if ($search !== '') {
     $keyword = strtolower($search);
-    $activeClients = array_values(array_filter($activeClients, static function (array $client) use ($keyword): bool {
+    $clientsList = array_values(array_filter($clientsList, static function (array $client) use ($keyword): bool {
         $haystack = implode(' ', [
             $client['name'] ?? '',
-            $client['service'] ?? '',
             $client['caller-id'] ?? '',
             $client['address'] ?? '',
-            $client['uptime'] ?? '',
+            $client['mapped'] ?? ''
         ]);
-
         return str_contains(strtolower($haystack), $keyword);
     }));
 }
@@ -203,13 +268,28 @@ require_once __DIR__ . '/partials/header.php';
 </style>
 
 <div class="page-wrap">
-<p class="page-heading">PPPoE Client Active</p>
-<p class="page-sub">Daftar klien PPPoE yang sedang aktif di Router MikroTik.</p>
+<p class="page-heading">Data PPPoE Client</p>
+<p class="page-sub">Daftar klien PPPoE beserta status koneksi dan mapping ONU.</p>
     <section class="panel">
 
             <?php if ($error !== ''): ?>
                 <div class="alert alert-error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
             <?php endif; ?>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
+                <div style="background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
+                    <div style="font-size: 12px; font-weight: 700; color: #c4b5fd; text-transform: uppercase; margin-bottom: 4px;">Total Secret PPPoE</div>
+                    <div style="font-size: 28px; font-weight: 800; color: #fff;"><?= $totalSecrets ?></div>
+                </div>
+                <div style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
+                    <div style="font-size: 12px; font-weight: 700; color: #6ee7b7; text-transform: uppercase; margin-bottom: 4px;">PPPoE Active</div>
+                    <div style="font-size: 28px; font-weight: 800; color: #fff;"><?= $totalActive ?></div>
+                </div>
+                <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); padding: 16px; border-radius: 12px; text-align: center;">
+                    <div style="font-size: 12px; font-weight: 700; color: #fca5a5; text-transform: uppercase; margin-bottom: 4px;">PPPoE Offline</div>
+                    <div style="font-size: 28px; font-weight: 800; color: #fff;"><?= $totalOffline ?></div>
+                </div>
+            </div>
 
             <form class="toolbar" method="get" action="">
                 <div class="search-box">
@@ -225,7 +305,7 @@ require_once __DIR__ . '/partials/header.php';
                 </div>
                 <button class="search-button btn btn-primary" type="submit">🔍 Cari</button>
                 <div class="result-count" id="pppoe-result-count">
-                    Total: <?= count($activeClients) ?> client
+                    Menampilkan: <?= count($clientsList) ?> client
                 </div>
             </form>
 
@@ -233,33 +313,52 @@ require_once __DIR__ . '/partials/header.php';
                 <table>
                     <thead>
                         <tr>
-                            <th>Name</th>
-                            <th>Service</th>
-                            <th>Caller ID</th>
-                            <th>Address</th>
-                            <th>Uptime</th>
+                            <th>Name & Status</th>
+                            <th>Service & Mapping</th>
+                            <th>MAC / IP Address</th>
+                            <th>Uptime / Last Active</th>
                             <th>Aksi</th>
                         </tr>
                     </thead>
                     <tbody id="pppoe-table-body">
-                        <?php if ($activeClients === []): ?>
+                        <?php if ($clientsList === []): ?>
                             <tr class="pppoe-row">
-                                <td class="empty" colspan="6">Tidak ada PPPoE client active.</td>
+                                <td class="empty" colspan="5">Tidak ada data PPPoE client.</td>
                             </tr>
                         <?php endif; ?>
 
-                        <?php foreach ($activeClients as $client): ?>
+                        <?php foreach ($clientsList as $client): ?>
                             <?php $clientIp   = $client['address'] ?? ''; ?>
                             <?php $clientName = $client['name'] ?? ''; ?>
-                            <tr class="pppoe-row">
-                                <td><?= htmlspecialchars($clientName ?: '-', ENT_QUOTES, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars($client['service'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars($client['caller-id'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars($clientIp !== '' ? $clientIp : '-', ENT_QUOTES, 'UTF-8') ?></td>
-                                <td><?= htmlspecialchars($client['uptime'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                            <?php $isOffline = $client['status'] === 'offline'; ?>
+                            <tr class="pppoe-row" <?= $isOffline ? 'style="background: rgba(239,68,68,0.05);"' : '' ?>>
+                                <td>
+                                    <strong style="color: <?= $isOffline ? '#fca5a5' : '#c4b5fd' ?>;"><?= htmlspecialchars($clientName ?: '-', ENT_QUOTES, 'UTF-8') ?></strong><br>
+                                    <span style="font-size: 11px; color: <?= $isOffline ? '#ef4444' : '#4ade80' ?>; font-weight: 600; text-transform: uppercase;"><?= $isOffline ? 'Offline' : 'Active' ?></span>
+                                </td>
+                                <td>
+                                    <span style="color: var(--clr-muted); font-size: 12px;"><?= htmlspecialchars($client['service'] ?? '-', ENT_QUOTES, 'UTF-8') ?></span><br>
+                                    <?php if ($client['mapped']): ?>
+                                        <span style="font-size: 11px; background: rgba(99,102,241,0.2); color: #a5b4fc; padding: 2px 6px; border-radius: 4px;">Mapped: <?= htmlspecialchars($client['mapped'], ENT_QUOTES, 'UTF-8') ?></span>
+                                    <?php else: ?>
+                                        <span style="font-size: 11px; color: #94a3b8;">Belum di-mapping</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <span style="color: #e2e8f0; font-size: 13px;"><?= htmlspecialchars($client['caller-id'] ?? '-', ENT_QUOTES, 'UTF-8') ?></span><br>
+                                    <span style="color: var(--clr-muted); font-size: 12px;"><?= htmlspecialchars($clientIp !== '' ? $clientIp : '-', ENT_QUOTES, 'UTF-8') ?></span>
+                                </td>
+                                <td>
+                                    <?php if (!$isOffline): ?>
+                                        <span style="color: #e2e8f0; font-size: 13px;">⏱️ <?= htmlspecialchars($client['uptime'] ?? '-', ENT_QUOTES, 'UTF-8') ?></span>
+                                    <?php else: ?>
+                                        <span style="color: #94a3b8; font-size: 12px;">Last Active:</span><br>
+                                        <span style="color: #fca5a5; font-size: 12px;"><?= htmlspecialchars($client['last_active'] !== '' ? $client['last_active'] : '-', ENT_QUOTES, 'UTF-8') ?></span>
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <div class="aksi-cell">
-                                        <?php if ($clientIp !== ''): ?>
+                                        <?php if ($clientIp !== '' && $clientIp !== '-' && !$isOffline): ?>
                                             <a
                                                 class="remote-link"
                                                 href="remote_action.php?ip=<?= urlencode($clientIp) ?>"
@@ -267,7 +366,7 @@ require_once __DIR__ . '/partials/header.php';
                                                 rel="noopener"
                                             >🔗 Remote</a>
                                         <?php endif; ?>
-                                        <?php if ($clientName !== ''): ?>
+                                        <?php if ($clientName !== '' && !$isOffline): ?>
                                             <button
                                                 class="btn-signal"
                                                 onclick="openSignalModal(<?= htmlspecialchars(json_encode($clientName), ENT_QUOTES, 'UTF-8') ?>)"
@@ -279,7 +378,7 @@ require_once __DIR__ . '/partials/header.php';
                             </tr>
                         <?php endforeach; ?>
                         <tr id="search-empty-row" style="display: none;">
-                            <td class="empty" colspan="6">Data tidak ditemukan.</td>
+                            <td class="empty" colspan="5">Data tidak ditemukan.</td>
                         </tr>
                     </tbody>
                 </table>
