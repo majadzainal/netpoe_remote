@@ -81,26 +81,36 @@ $stmt->execute(['user_id' => $userId]);
 $olt = $stmt->fetch();
 
 $activeClients = [];
-$stmt = $pdo->prepare('SELECT id, ip_address, api_user, api_pass, api_port FROM routers WHERE user_id = :user_id ORDER BY id ASC LIMIT 1');
-$stmt->execute(['user_id' => $userId]);
-$router = $stmt->fetch();
+$routerCacheKey = 'active_pppoe_' . $userId;
 
-if ($router) {
-    require_once __DIR__ . '/../../libs/RouterosAPI.php';
-    $api = new RouterosAPI();
-    $api->timeout = 5;
-    try {
-        if ($api->connect($router['ip_address'], $router['api_user'], $router['api_pass'], (int) $router['api_port'])) {
-            $response = $api->comm('/ppp/active/print');
-            foreach ($response as $item) {
-                if (isset($item['!re'])) {
-                    $activeClients[] = $item;
+if (isset($_SESSION[$routerCacheKey]) && $_SESSION[$routerCacheKey]['expires_at'] >= time()) {
+    $activeClients = $_SESSION[$routerCacheKey]['data'];
+} else {
+    $stmt = $pdo->prepare('SELECT id, ip_address, api_user, api_pass, api_port FROM routers WHERE user_id = :user_id ORDER BY id ASC LIMIT 1');
+    $stmt->execute(['user_id' => $userId]);
+    $router = $stmt->fetch();
+
+    if ($router) {
+        require_once __DIR__ . '/../../libs/RouterosAPI.php';
+        $api = new RouterosAPI();
+        $api->timeout = 5;
+        try {
+            if ($api->connect($router['ip_address'], $router['api_user'], $router['api_pass'], (int) $router['api_port'])) {
+                $response = $api->comm('/ppp/active/print');
+                foreach ($response as $item) {
+                    if (isset($item['!re'])) {
+                        $activeClients[] = $item;
+                    }
                 }
+                $api->disconnect();
+                $_SESSION[$routerCacheKey] = [
+                    'data' => $activeClients,
+                    'expires_at' => time() + 300 // cache 5 menit
+                ];
             }
+        } catch (Throwable $exception) {
             $api->disconnect();
         }
-    } catch (Throwable $exception) {
-        $api->disconnect();
     }
 }
 
@@ -940,9 +950,16 @@ canvas { border-radius: 8px; }
                             }
                             
                             if (!isset($ponCounts[$ponPort])) {
-                                $ponCounts[$ponPort] = 0;
+                                $ponCounts[$ponPort] = ['total' => 0, 'up' => 0, 'down' => 0];
                             }
-                            $ponCounts[$ponPort]++;
+                            $ponCounts[$ponPort]['total']++;
+                            
+                            $statusText = strtolower(trim($row['status']));
+                            if (str_starts_with($statusText, 'up') || str_starts_with($statusText, 'working') || str_starts_with($statusText, 'online')) {
+                                $ponCounts[$ponPort]['up']++;
+                            } else {
+                                $ponCounts[$ponPort]['down']++;
+                            }
                         }
                         // Sort naturally so 0/1/1 comes before 0/1/2 etc.
                         uksort($ponCounts, 'strnatcmp');
@@ -951,30 +968,59 @@ canvas { border-radius: 8px; }
                         $ponCapacity = $oltProfile['pon_capacity'] ?? '?';
                         ?>
                         <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;">
-                            <?php foreach ($ponCounts as $port => $count): ?>
-                                <div style="background: rgba(255,255,255,0.05); border: 1px solid var(--clr-border); padding: 10px 16px; border-radius: 8px;">
+                            <?php foreach ($ponCounts as $port => $stats): ?>
+                                <div class="pon-card" onclick="filterPon('<?= htmlspecialchars((string) $port, ENT_QUOTES, 'UTF-8') ?>', event)" style="background: rgba(255,255,255,0.05); border: 1px solid var(--clr-border); padding: 10px 16px; border-radius: 8px; cursor: pointer; transition: all 0.2s;">
                                     <span style="color: var(--clr-muted); font-size: 12px; display: block; margin-bottom: 4px;">PON <?= htmlspecialchars((string) $port, ENT_QUOTES, 'UTF-8') ?></span>
-                                    <strong style="color: var(--clr-text); font-size: 18px;"><?= $count ?> / <?= htmlspecialchars((string) $ponCapacity, ENT_QUOTES, 'UTF-8') ?></strong>
+                                    <strong style="color: var(--clr-text); font-size: 18px;"><?= $stats['total'] ?> / <?= htmlspecialchars((string) $ponCapacity, ENT_QUOTES, 'UTF-8') ?></strong>
+                                    <div style="font-size: 11.5px; margin-top: 6px; display: flex; gap: 8px;">
+                                        <span style="color: #4ade80; font-weight: 600;">Up: <?= $stats['up'] ?></span>
+                                        <span style="color: #f87171; font-weight: 600;">Down: <?= $stats['down'] ?></span>
+                                    </div>
                                 </div>
                             <?php endforeach; ?>
                         </div>
                     <?php endif; ?>
 
-                    <table>
+                    <table id="onu-list-table">
                         <thead><tr><th>ONU ID</th><th>MAC / Serial</th><th>Status</th><th>Uptime / Optical</th><th>Nama</th><th>Aksi</th></tr></thead>
                         <tbody>
                             <?php if ($onuRows === []): ?>
                                 <tr><td colspan="6">Output belum bisa diparse otomatis. Lihat Raw List ONU di bawah.</td></tr>
                             <?php endif; ?>
                             <?php foreach ($onuRows as $onuRow): ?>
+                                <?php
+                                $matchedPppoe = '';
+                                $matchedCust = '';
+                                $matchedId = null;
+                                foreach ($mappings as $map) {
+                                    $mapMac = trim($map['mac_address'] ?? '');
+                                    $onuMac = trim($onuRow['mac'] ?? '');
+                                    if (($mapMac !== '' && $onuMac !== '' && strcasecmp($mapMac, $onuMac) === 0) || 
+                                        strcasecmp(trim($map['pon_onu']), trim($onuRow['pon_onu'])) === 0) {
+                                        $matchedPppoe = $map['pppoe_name'];
+                                        $matchedCust = $map['customer_name'] ?? '';
+                                        $matchedId = $map['id'];
+                                        break;
+                                    }
+                                }
+                                ?>
                                 <tr>
                                     <td><code><?= htmlspecialchars($onuRow['pon_onu'], ENT_QUOTES, 'UTF-8') ?></code></td>
                                     <td><?= htmlspecialchars(mb_strtoupper($onuRow['mac'] ?? '', 'UTF-8'), ENT_QUOTES, 'UTF-8') ?></td>
                                     <td style="color: <?= ($onuRow['status'] ?? '') !== '' && str_starts_with($onuRow['status'], 'Up') ? '#166534' : '#991b1b' ?>; font-weight:700"><?= htmlspecialchars($onuRow['status'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                                     <td><?= htmlspecialchars($onuRow['uptime'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
-                                    <td><?= htmlspecialchars($onuRow['name'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                                     <td>
-                                        <button type="button" class="button btn-sm" onclick="openAddMappingModal(<?= htmlspecialchars(json_encode($onuRow['pon_onu']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode(mb_strtoupper($onuRow['mac'] ?? '', 'UTF-8')), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($onuRow['name'] ?? ''), ENT_QUOTES, 'UTF-8') ?>)">+ Mapping</button>
+                                        <?php if ($matchedPppoe !== ''): ?>
+                                            <span style="display:inline-block; padding: 2px 6px; background: rgba(99,102,241,0.15); color: #818cf8; border-radius: 4px; font-size: 11px; margin-bottom: 4px;">Mapped: <?= htmlspecialchars($matchedPppoe, ENT_QUOTES, 'UTF-8') ?></span><br>
+                                        <?php endif; ?>
+                                        <?= htmlspecialchars($onuRow['name'] ?? '', ENT_QUOTES, 'UTF-8') ?>
+                                    </td>
+                                    <td>
+                                        <?php if ($matchedPppoe !== ''): ?>
+                                            <button type="button" class="button btn-sm btn-warning" onclick="openEditModal(<?= $matchedId ?>, <?= htmlspecialchars(json_encode($matchedPppoe), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($onuRow['pon_onu']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode(mb_strtoupper($onuRow['mac'] ?? '', 'UTF-8')), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($matchedCust), ENT_QUOTES, 'UTF-8') ?>)">Edit Mapping</button>
+                                        <?php else: ?>
+                                            <button type="button" class="button btn-sm" onclick="openAddMappingModal(<?= htmlspecialchars(json_encode($onuRow['pon_onu']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode(mb_strtoupper($onuRow['mac'] ?? '', 'UTF-8')), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($onuRow['name'] ?? ''), ENT_QUOTES, 'UTF-8') ?>)">+ Mapping</button>
+                                        <?php endif; ?>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -1045,6 +1091,75 @@ canvas { border-radius: 8px; }
         document.getElementById('editMappingModal').addEventListener('click', function(e) {
             if (e.target === this) closeEditModal();
         });
+
+        // ── Filter PON dan fetch signal otomatis ────────────────────────
+        function filterPon(portNumber, event) {
+            const table = document.getElementById('onu-list-table');
+            if (!table) return;
+            const rows = table.querySelectorAll('tbody tr');
+            
+            const currentCard = event.currentTarget;
+            if (currentCard.dataset.active === '1') {
+                // Tampilkan semua baris jika diklik lagi
+                currentCard.dataset.active = '0';
+                currentCard.style.background = 'rgba(255,255,255,0.05)';
+                currentCard.style.borderColor = 'var(--clr-border)';
+                rows.forEach(r => r.style.display = '');
+                return;
+            }
+            
+            document.querySelectorAll('.pon-card').forEach(c => {
+                c.dataset.active = '0';
+                c.style.background = 'rgba(255,255,255,0.05)';
+                c.style.borderColor = 'var(--clr-border)';
+            });
+            currentCard.dataset.active = '1';
+            currentCard.style.background = 'rgba(99,102,241,0.15)';
+            currentCard.style.borderColor = '#6366f1';
+            
+            rows.forEach(row => {
+                const onuIdCell = row.querySelector('td:first-child code');
+                if (!onuIdCell) return; // skip header/empty rows
+                
+                const onuIdText = onuIdCell.textContent.trim();
+                const macText = row.cells[1].textContent.trim();
+                
+                let isMatch = false;
+                if (onuIdText === portNumber || onuIdText.startsWith(portNumber + ' ') || onuIdText.startsWith(portNumber + ':') || onuIdText.startsWith(portNumber + '_') || onuIdText.startsWith(portNumber + '/')) {
+                    isMatch = true;
+                }
+                
+                if (isMatch) {
+                    row.style.display = '';
+                    
+                    const uptimeCell = row.cells[3]; // Kolom Uptime / Optical
+                    // Fetch jika belum di-fetch dan statusnya UP (jika status column = UP)
+                    const statusText = row.cells[2].textContent.trim().toLowerCase();
+                    if (!uptimeCell.dataset.fetching && !uptimeCell.dataset.fetched && statusText.startsWith('up')) {
+                        uptimeCell.dataset.fetching = '1';
+                        uptimeCell.innerHTML += '<br><span style="color: #fbbf24; font-size: 11px;">(Mengambil signal...)</span>';
+                        
+                        fetch(`signal_check.php?pon_onu=${encodeURIComponent(onuIdText)}&mac=${encodeURIComponent(macText)}`)
+                            .then(r => r.json())
+                            .then(data => {
+                                uptimeCell.dataset.fetched = '1';
+                                if (data.ok && data.tx !== null && data.rx !== null) {
+                                    const txColor = data.tx_cat && data.tx_cat.color ? data.tx_cat.color : '#cbd5e1';
+                                    const rxColor = data.rx_cat && data.rx_cat.color ? data.rx_cat.color : '#cbd5e1';
+                                    uptimeCell.innerHTML = uptimeCell.innerHTML.split('<br>')[0] + `<br><span style="color: ${txColor}; font-size: 12px; font-weight: 600;">Tx: ${data.tx.toFixed(2)}</span> | <span style="color: ${rxColor}; font-size: 12px; font-weight: 600;">Rx: ${data.rx.toFixed(2)}</span>`;
+                                } else {
+                                    uptimeCell.innerHTML = uptimeCell.innerHTML.split('<br>')[0] + `<br><span style="color: #ef4444; font-size: 11px;">(Gagal)</span>`;
+                                }
+                            })
+                            .catch(e => {
+                                uptimeCell.innerHTML = uptimeCell.innerHTML.split('<br>')[0] + `<br><span style="color: #ef4444; font-size: 11px;">(Gagal)</span>`;
+                            });
+                    }
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
         // ── Graph Optical Power ─────────────────────────────────────────
         const tx = <?= json_encode($opticalData['tx'] ?? null) ?>;
         const rx = <?= json_encode($opticalData['rx'] ?? null) ?>;

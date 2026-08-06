@@ -15,10 +15,12 @@ ignore_user_abort(false);
 
 $userId    = (int) $_SESSION['user_id'];
 $pppoeName = trim($_GET['pppoe'] ?? '');
+$directPon = trim($_GET['pon_onu'] ?? '');
+$directMac = trim($_GET['mac'] ?? '');
 
-if ($pppoeName === '') {
+if ($pppoeName === '' && $directPon === '') {
     http_response_code(400);
-    echo json_encode(['ok' => false, 'error' => 'PPPoE name tidak boleh kosong.']);
+    echo json_encode(['ok' => false, 'error' => 'PPPoE name atau PON/ONU tidak boleh kosong.']);
     exit;
 }
 
@@ -33,28 +35,42 @@ if (!$olt) {
 }
 
 // ── Cari mapping PPPoE → ONU ──────────────────────────────────────────────
-$stmt = $pdo->prepare(
-    'SELECT pppoe_name, pon_onu, mac_address, customer_name
-     FROM olt_pppoe_mappings
-     WHERE user_id = :uid AND olt_id = :olt_id AND pppoe_name = :pppoe_name
-     LIMIT 1'
-);
-$stmt->execute([
-    'uid'        => $userId,
-    'olt_id'     => (int) $olt['id'],
-    'pppoe_name' => $pppoeName,
-]);
-$mapping = $stmt->fetch();
+$ponOnu = '';
+$macAddress = '';
+$customerName = '';
 
-if (!$mapping) {
-    echo json_encode([
-        'ok'    => false,
-        'error' => "PPPoE \"{$pppoeName}\" belum di-mapping ke ONU. Buka Monitoring OLT untuk menambahkan mapping.",
+if ($pppoeName !== '') {
+    $stmt = $pdo->prepare(
+        'SELECT pppoe_name, pon_onu, mac_address, customer_name
+         FROM olt_pppoe_mappings
+         WHERE user_id = :uid AND olt_id = :olt_id AND pppoe_name = :pppoe_name
+         LIMIT 1'
+    );
+    $stmt->execute([
+        'uid'        => $userId,
+        'olt_id'     => (int) $olt['id'],
+        'pppoe_name' => $pppoeName,
     ]);
-    exit;
+    $mapping = $stmt->fetch();
+
+    if (!$mapping) {
+        echo json_encode([
+            'ok'    => false,
+            'error' => "PPPoE \"{$pppoeName}\" belum di-mapping ke ONU. Buka Monitoring OLT untuk menambahkan mapping.",
+        ]);
+        exit;
+    }
+    
+    $ponOnu = $mapping['pon_onu'];
+    $macAddress = $mapping['mac_address'] ?? '';
+    $customerName = $mapping['customer_name'] ?? '-';
+} else {
+    $ponOnu = $directPon;
+    $macAddress = $directMac;
+    $pppoeName = '-';
+    $customerName = '-';
 }
 
-$ponOnu = $mapping['pon_onu'];
 $brand  = strtolower((string) ($olt['brand'] ?? ''));
 
 // ── Helper: split command string ───────────────────────────────────────────
