@@ -32,12 +32,19 @@ $pdo->exec(
       olt_id INT UNSIGNED NOT NULL,
       pppoe_name VARCHAR(100) NOT NULL,
       pon_onu VARCHAR(100) NOT NULL,
+      mac_address VARCHAR(100) NULL,
       customer_name VARCHAR(100) NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uniq_mapping_user_pppoe (user_id, pppoe_name),
       INDEX idx_mapping_olt_id (olt_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
 );
+
+try {
+    $pdo->exec("ALTER TABLE olt_pppoe_mappings ADD COLUMN mac_address VARCHAR(100) NULL AFTER pon_onu");
+} catch (Throwable $exception) {
+    // Column already exists
+}
 
 $pdo->exec(
     "CREATE TABLE IF NOT EXISTS olts (
@@ -73,23 +80,49 @@ $stmt = $pdo->prepare('SELECT * FROM olts WHERE user_id = :user_id ORDER BY id A
 $stmt->execute(['user_id' => $userId]);
 $olt = $stmt->fetch();
 
+$activeClients = [];
+$stmt = $pdo->prepare('SELECT id, ip_address, api_user, api_pass, api_port FROM routers WHERE user_id = :user_id ORDER BY id ASC LIMIT 1');
+$stmt->execute(['user_id' => $userId]);
+$router = $stmt->fetch();
+
+if ($router) {
+    require_once __DIR__ . '/../../libs/RouterosAPI.php';
+    $api = new RouterosAPI();
+    $api->timeout = 5;
+    try {
+        if ($api->connect($router['ip_address'], $router['api_user'], $router['api_pass'], (int) $router['api_port'])) {
+            $response = $api->comm('/ppp/active/print');
+            foreach ($response as $item) {
+                if (isset($item['!re'])) {
+                    $activeClients[] = $item;
+                }
+            }
+            $api->disconnect();
+        }
+    } catch (Throwable $exception) {
+        $api->disconnect();
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
     if ($action === 'save_mapping' && $olt) {
         $pppoeName = trim($_POST['pppoe_name'] ?? '');
         $ponOnu = trim($_POST['pon_onu'] ?? '');
+        $macAddress = trim($_POST['mac_address'] ?? '');
         $customerName = trim($_POST['customer_name'] ?? '');
 
         if ($pppoeName === '' || $ponOnu === '') {
             $error = 'PPPoE name dan PON/ONU wajib diisi.';
         } else {
             $stmt = $pdo->prepare(
-                'INSERT INTO olt_pppoe_mappings (user_id, olt_id, pppoe_name, pon_onu, customer_name)
-                 VALUES (:user_id, :olt_id, :pppoe_name, :pon_onu, :customer_name)
+                'INSERT INTO olt_pppoe_mappings (user_id, olt_id, pppoe_name, pon_onu, mac_address, customer_name)
+                 VALUES (:user_id, :olt_id, :pppoe_name, :pon_onu, :mac_address, :customer_name)
                  ON DUPLICATE KEY UPDATE
                     olt_id = VALUES(olt_id),
                     pon_onu = VALUES(pon_onu),
+                    mac_address = VALUES(mac_address),
                     customer_name = VALUES(customer_name)'
             );
             $stmt->execute([
@@ -97,6 +130,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'olt_id'  => (int) $olt['id'],
                 'pppoe_name'   => $pppoeName,
                 'pon_onu'      => $ponOnu,
+                'mac_address'  => $macAddress !== '' ? $macAddress : null,
                 'customer_name' => $customerName !== '' ? $customerName : null,
             ]);
             // PRG: redirect agar tidak reload ulang halaman berat
@@ -126,6 +160,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $mappingId    = (int) ($_POST['mapping_id'] ?? 0);
         $pppoeName    = trim($_POST['pppoe_name'] ?? '');
         $ponOnu       = trim($_POST['pon_onu'] ?? '');
+        $macAddress   = trim($_POST['mac_address'] ?? '');
         $customerName = trim($_POST['customer_name'] ?? '');
 
         if ($mappingId > 0 && $pppoeName !== '' && $ponOnu !== '') {
@@ -134,12 +169,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'UPDATE olt_pppoe_mappings
                      SET pppoe_name = :pppoe_name,
                          pon_onu = :pon_onu,
+                         mac_address = :mac_address,
                          customer_name = :customer_name
                      WHERE id = :id AND user_id = :user_id AND olt_id = :olt_id'
                 );
                 $stmt->execute([
                     'pppoe_name'    => $pppoeName,
                     'pon_onu'       => $ponOnu,
+                    'mac_address'   => $macAddress !== '' ? $macAddress : null,
                     'customer_name' => $customerName !== '' ? $customerName : null,
                     'id'            => $mappingId,
                     'user_id'       => $userId,
@@ -168,7 +205,7 @@ if (isset($_GET['updated'])) $message = 'Mapping berhasil diperbarui.';
 $mappings = [];
 if ($olt) {
     $stmt = $pdo->prepare(
-        'SELECT id, pppoe_name, pon_onu, customer_name
+        'SELECT id, pppoe_name, pon_onu, mac_address, customer_name
          FROM olt_pppoe_mappings
          WHERE user_id = :user_id AND olt_id = :olt_id
          ORDER BY pppoe_name ASC'
@@ -501,7 +538,7 @@ function runAllUsefulOltCommands(OltTelnet $telnet, array $olt, array $commands,
     return [$lastOutput, $lastCommand];
 }
 
-if ($olt && $showOnuList) {
+if ($olt && ($showOnuList || $selectedPppoe !== '')) {
     $cacheKey = 'onu_list_' . $userId . '_' . (int) $olt['id'];
     $cachedOnuList = $_SESSION[$cacheKey] ?? null;
 
@@ -624,6 +661,15 @@ if ($olt && $selectedPppoe !== '') {
     }
 
     if ($selectedMapping) {
+        if (($selectedMapping['mac_address'] ?? '') !== '') {
+            foreach ($onuRows as $row) {
+                if (($row['mac'] ?? '') !== '' && strcasecmp($row['mac'], $selectedMapping['mac_address']) === 0) {
+                    $selectedMapping['pon_onu'] = $row['pon_onu'];
+                    break;
+                }
+            }
+        }
+
         $brand  = strtolower((string) ($olt['brand'] ?? ''));
         $telnet = new OltTelnet();
 
@@ -755,7 +801,7 @@ canvas { border-radius: 8px; }
                                     <div class="actions">
                                         <a class="button btn-sm" href="?pppoe=<?= urlencode($mapping['pppoe_name']) ?>" title="Lihat Graph">&#128202;</a>
                                         <button type="button" class="button btn-sm btn-warning" title="Edit Mapping"
-                                            onclick="openEditModal(<?= $mapping['id'] ?>, <?= htmlspecialchars(json_encode($mapping['pppoe_name']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($mapping['pon_onu']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($mapping['customer_name'] ?? ''), ENT_QUOTES, 'UTF-8') ?>)">&#9998;</button>
+                                            onclick="openEditModal(<?= $mapping['id'] ?>, <?= htmlspecialchars(json_encode($mapping['pppoe_name']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($mapping['pon_onu']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($mapping['mac_address'] ?? ''), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($mapping['customer_name'] ?? ''), ENT_QUOTES, 'UTF-8') ?>)">&#9998;</button>
                                         <form method="post" action="" style="display:inline" onsubmit="return confirm('Hapus mapping <?= htmlspecialchars(addslashes($mapping['pppoe_name']), ENT_QUOTES, 'UTF-8') ?>?')">
                                             <input type="hidden" name="action" value="delete_mapping">
                                             <input type="hidden" name="mapping_id" value="<?= $mapping['id'] ?>">
@@ -781,8 +827,11 @@ canvas { border-radius: 8px; }
                         <label for="edit_pppoe_name">PPPoE Name</label>
                         <input type="text" id="edit_pppoe_name" name="pppoe_name" required>
 
-                        <label for="edit_pon_onu">PON/ONU</label>
+                        <label for="edit_pon_onu">PON/ONU (Last known)</label>
                         <input type="text" id="edit_pon_onu" name="pon_onu" required placeholder="contoh: 1/1/1:12">
+
+                        <label for="edit_mac_address">MAC / Serial (Primary)</label>
+                        <input type="text" id="edit_mac_address" name="mac_address" placeholder="MAC atau SN statis">
 
                         <label for="edit_customer_name">Nama Pelanggan</label>
                         <input type="text" id="edit_customer_name" name="customer_name" placeholder="Opsional">
@@ -790,6 +839,40 @@ canvas { border-radius: 8px; }
                         <div class="modal-actions">
                             <button type="button" class="button btn-secondary" onclick="closeEditModal()">Batal</button>
                             <button type="submit" class="button">Simpan Perubahan</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Modal Add Mapping dari ONU List -->
+            <div class="modal-overlay" id="addMappingModal">
+                <div class="modal-box">
+                    <h3>&#10133; Tambah Mapping dari ONU</h3>
+                    <form method="post" action="" id="addMappingForm">
+                        <input type="hidden" name="action" value="save_mapping">
+                        
+                        <label for="add_pon_onu">PON/ONU</label>
+                        <input type="text" id="add_pon_onu" name="pon_onu" readonly style="background: rgba(0,0,0,0.1); cursor: not-allowed;">
+
+                        <label for="add_mac_address">MAC / Serial (Primary)</label>
+                        <input type="text" id="add_mac_address" name="mac_address" readonly style="background: rgba(0,0,0,0.1); cursor: not-allowed;">
+
+                        <label for="add_pppoe_name">Pilih PPPoE Client (Active)</label>
+                        <select id="add_pppoe_name" name="pppoe_name" required>
+                            <option value="">-- Pilih dari list Active PPPoE --</option>
+                            <?php foreach ($activeClients as $client): ?>
+                                <option value="<?= htmlspecialchars($client['name'] ?? '', ENT_QUOTES, 'UTF-8') ?>">
+                                    <?= htmlspecialchars(($client['name'] ?? '') . ' (' . ($client['caller-id'] ?? '-') . ')', ENT_QUOTES, 'UTF-8') ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+
+                        <label for="add_customer_name">Nama Pelanggan (Opsional)</label>
+                        <input type="text" id="add_customer_name" name="customer_name" placeholder="Otomatis dari OLT jika kosong">
+
+                        <div class="modal-actions">
+                            <button type="button" class="button btn-secondary" onclick="closeAddMappingModal()">Batal</button>
+                            <button type="submit" class="button">Simpan Mapping</button>
                         </div>
                     </form>
                 </div>
@@ -884,10 +967,10 @@ canvas { border-radius: 8px; }
                     <?php endif; ?>
 
                     <table>
-                        <thead><tr><th>ONU ID</th><th>MAC / Serial</th><th>Status</th><th>Uptime / Optical</th><th>Nama</th></tr></thead>
+                        <thead><tr><th>ONU ID</th><th>MAC / Serial</th><th>Status</th><th>Uptime / Optical</th><th>Nama</th><th>Aksi</th></tr></thead>
                         <tbody>
                             <?php if ($onuRows === []): ?>
-                                <tr><td colspan="5">Output belum bisa diparse otomatis. Lihat Raw List ONU di bawah.</td></tr>
+                                <tr><td colspan="6">Output belum bisa diparse otomatis. Lihat Raw List ONU di bawah.</td></tr>
                             <?php endif; ?>
                             <?php foreach ($onuRows as $onuRow): ?>
                                 <tr>
@@ -896,6 +979,9 @@ canvas { border-radius: 8px; }
                                     <td style="color: <?= ($onuRow['status'] ?? '') !== '' && str_starts_with($onuRow['status'], 'Up') ? '#166534' : '#991b1b' ?>; font-weight:700"><?= htmlspecialchars($onuRow['status'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                                     <td><?= htmlspecialchars($onuRow['uptime'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                                     <td><?= htmlspecialchars($onuRow['name'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
+                                    <td>
+                                        <button type="button" class="button btn-sm" onclick="openAddMappingModal(<?= htmlspecialchars(json_encode($onuRow['pon_onu']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode(mb_strtoupper($onuRow['mac'] ?? '', 'UTF-8')), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($onuRow['name'] ?? ''), ENT_QUOTES, 'UTF-8') ?>)">+ Mapping</button>
+                                    </td>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
@@ -935,11 +1021,26 @@ canvas { border-radius: 8px; }
 </div>
 
     <script>
+        // ── Modal Add Mapping dari ONU List ─────────────────────────────
+        function openAddMappingModal(ponOnu, macAddress, defaultName) {
+            document.getElementById('add_pon_onu').value = ponOnu;
+            document.getElementById('add_mac_address').value = macAddress;
+            document.getElementById('add_customer_name').value = defaultName || '';
+            document.getElementById('addMappingModal').classList.add('active');
+        }
+        function closeAddMappingModal() {
+            document.getElementById('addMappingModal').classList.remove('active');
+        }
+        document.getElementById('addMappingModal').addEventListener('click', function(e) {
+            if (e.target === this) closeAddMappingModal();
+        });
+
         // ── Modal Edit Mapping ──────────────────────────────────────────
-        function openEditModal(id, pppoeName, ponOnu, customerName) {
+        function openEditModal(id, pppoeName, ponOnu, macAddress, customerName) {
             document.getElementById('edit_mapping_id').value    = id;
             document.getElementById('edit_pppoe_name').value    = pppoeName;
             document.getElementById('edit_pon_onu').value       = ponOnu;
+            document.getElementById('edit_mac_address').value   = macAddress || '';
             document.getElementById('edit_customer_name').value = customerName || '';
             document.getElementById('editMappingModal').classList.add('active');
         }

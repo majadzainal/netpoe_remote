@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS `olt_pppoe_mappings` (
   `olt_id` int(10) unsigned NOT NULL,
   `pppoe_name` varchar(100) NOT NULL,
   `pon_onu` varchar(100) NOT NULL,
+  `mac_address` varchar(100) DEFAULT NULL,
   `customer_name` varchar(100) DEFAULT NULL,
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),

@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS olt_pppoe_mappings (
   olt_id INT UNSIGNED NOT NULL,
   pppoe_name VARCHAR(100) NOT NULL,
   pon_onu VARCHAR(100) NOT NULL,
+  mac_address VARCHAR(100) NULL,
   customer_name VARCHAR(100) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_olt_pppoe_mappings_user
