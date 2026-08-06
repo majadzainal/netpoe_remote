@@ -269,6 +269,14 @@ require_once __DIR__ . '/partials/header.php';
 /* ── Summary Card Filter ── */
 .summary-card { cursor: pointer; transition: all 0.2s; }
 .summary-card:hover { transform: translateY(-3px); filter: brightness(1.2); }
+
+/* ── Sortable Table ── */
+.sortable { cursor: pointer; user-select: none; transition: background 0.15s; position: relative; padding-right: 22px !important; }
+.sortable:hover { background: rgba(255,255,255,0.05); }
+.sort-icon { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 14px; text-align: center; color: #64748b; font-size: 11px; }
+.sortable:not(.sort-asc):not(.sort-desc) .sort-icon::after { content: '↕'; opacity: 0.3; }
+.sort-asc .sort-icon::after { content: '▲'; color: #a5b4fc; }
+.sort-desc .sort-icon::after { content: '▼'; color: #a5b4fc; }
 </style>
 
 <div class="page-wrap">
@@ -317,16 +325,16 @@ require_once __DIR__ . '/partials/header.php';
                 <table>
                     <thead>
                         <tr>
-                            <th>Name & Status</th>
-                            <th>Service & Mapping</th>
-                            <th>MAC / IP Address</th>
-                            <th>Uptime / Last Active</th>
+                            <th class="sortable" onclick="sortTable(0)">Name & Status <span class="sort-icon"></span></th>
+                            <th class="sortable" onclick="sortTable(1)">Service & Mapping <span class="sort-icon"></span></th>
+                            <th class="sortable" onclick="sortTable(2)">MAC / IP Address <span class="sort-icon"></span></th>
+                            <th class="sortable" onclick="sortTable(3)">Uptime / Last Active <span class="sort-icon"></span></th>
                             <th>Aksi</th>
                         </tr>
                     </thead>
                     <tbody id="pppoe-table-body">
                         <?php if ($clientsList === []): ?>
-                            <tr class="pppoe-row">
+                            <tr class="pppoe-row empty-row">
                                 <td class="empty" colspan="5">Tidak ada data PPPoE client.</td>
                             </tr>
                         <?php endif; ?>
@@ -587,7 +595,7 @@ require_once __DIR__ . '/partials/header.php';
         const rows = document.querySelectorAll('.pppoe-row');
         let count = 0;
         rows.forEach(row => {
-            if (row.classList.contains('empty')) return;
+            if (row.classList.contains('empty-row') || row.id === 'search-empty-row') return;
             const rowStatus = row.getAttribute('data-status');
             if (status === 'all' || rowStatus === status) {
                 row.style.display = '';
@@ -597,6 +605,39 @@ require_once __DIR__ . '/partials/header.php';
             }
         });
         document.getElementById('pppoe-result-count').textContent = 'Menampilkan: ' + count + ' client';
+    }
+
+    let sortOrders = [1, 1, 1, 1]; // 1 for asc, -1 for desc
+
+    function sortTable(colIndex) {
+        const tbody = document.getElementById('pppoe-table-body');
+        const rows = Array.from(tbody.querySelectorAll('tr.pppoe-row:not(.empty-row)'));
+        if (rows.length === 0) return;
+
+        // Reset icon arah panah di kolom lain
+        document.querySelectorAll('th.sortable').forEach((th, i) => {
+            if (i !== colIndex) {
+                th.classList.remove('sort-asc', 'sort-desc');
+                sortOrders[i] = 1;
+            }
+        });
+
+        const header = document.querySelectorAll('th.sortable')[colIndex];
+        const isAsc = sortOrders[colIndex] === 1;
+        
+        header.classList.remove('sort-asc', 'sort-desc');
+        header.classList.add(isAsc ? 'sort-asc' : 'sort-desc');
+
+        rows.sort((a, b) => {
+            let valA = a.cells[colIndex].textContent.trim().toLowerCase();
+            let valB = b.cells[colIndex].textContent.trim().toLowerCase();
+            return valA.localeCompare(valB, undefined, {numeric: true}) * sortOrders[colIndex];
+        });
+
+        sortOrders[colIndex] *= -1; // toggle untuk klik berikutnya
+        
+        // Render ulang
+        rows.forEach(row => tbody.appendChild(row));
     }
 </script>
 </body>
