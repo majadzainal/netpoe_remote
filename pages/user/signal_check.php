@@ -336,7 +336,7 @@ try {
         $stmtCacheUpdate = $pdo->prepare('
             INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power)
             VALUES (?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power)
+            ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()
         ');
         $stmtCacheUpdate->execute([$userId, (int)$olt['id'], $ponOnu, $tx, $rx]);
     }
@@ -382,4 +382,6 @@ echo json_encode([
     'rx_cat'       => scSignalCategory($rx, 'rx'),
     'is_cached'    => $isCached,
     'cached_updated_at' => $cachedUpdatedAt,
+    'fetched_at'   => date('d M Y H:i:s'),
 ]);
+

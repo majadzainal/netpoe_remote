@@ -17,13 +17,17 @@ $options = [
     PDO::ATTR_EMULATE_PREPARES => false,
 ];
 
+date_default_timezone_set('Asia/Jakarta');
+
 try {
     $pdo = new PDO($dsn, $dbUser, $dbPass, $options);
+    $pdo->exec("SET time_zone = '+07:00'");
 } catch (PDOException $exception) {
     error_log('Database connection failed: ' . $exception->getMessage());
     http_response_code(500);
     exit('Database connection failed.');
 }
+
 
 /*
  * Gunakan prepared statement untuk seluruh query database.

@@ -813,6 +813,11 @@ function closeSyncLogModal() {
                 </div>
             </div>
 
+            <div class="cmd-info" style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px;">
+                <div>Waktu Ambil Sinyal: <code id="rFetchTime" style="color: #60a5fa; font-weight: 600;">—</code></div>
+                <div>Metode: <code id="rFetchMethod" style="color: #34d399; font-weight: 600;">Direct Telnet OLT</code></div>
+            </div>
+
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                 <div class="cmd-info" style="margin-bottom: 0;">
                     Command: <code id="rCmd">—</code>
@@ -880,6 +885,16 @@ function closeSyncLogModal() {
         document.getElementById('rCmd').textContent       = d.command_used || '—';
         document.getElementById('modalSub').textContent   = d.brand + ' ' + d.model;
 
+        const elTime = document.getElementById('rFetchTime');
+        const elMethod = document.getElementById('rFetchMethod');
+        if (elTime) {
+            elTime.textContent = d.is_cached ? (d.cached_updated_at || '—') : (d.fetched_at || '—');
+        }
+        if (elMethod) {
+            elMethod.textContent = d.is_cached ? 'Database Cache' : 'Direct Telnet OLT';
+            elMethod.style.color = d.is_cached ? '#fbbf24' : '#34d399';
+        }
+
         // TX
         const txVal = d.tx !== null ? d.tx.toFixed(2) : '—';
         document.getElementById('rTxVal').textContent    = txVal;
@@ -896,20 +911,16 @@ function closeSyncLogModal() {
 
         const btnRefresh = document.getElementById('btnForceRefresh');
         if (d.is_cached) {
-            document.getElementById('rCmd').textContent = 'Cache (' + d.cached_updated_at + ')';
             btnRefresh.style.display = 'block';
             btnRefresh.onclick = () => openSignalModal(d.pppoe_name, true);
         } else {
-            document.getElementById('rCmd').textContent = d.command_used || '—';
             btnRefresh.style.display = 'none';
         }
     }
 
     async function openSignalModal(pppoeName, forceRefresh = false) {
-        if (!forceRefresh) {
-            modal.classList.add('active');
-            document.body.style.overflow = 'hidden';
-        }
+        modal.classList.add('active');
+        document.body.style.overflow = 'hidden';
         showLoading();
 
         // AbortController: batalkan request jika > 35 detik (hindari nginx timeout)
@@ -945,6 +956,7 @@ function closeSyncLogModal() {
             }
         }
     }
+
 
     function closeSignalModal() {
         modal.classList.remove('active');
