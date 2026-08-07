@@ -41,6 +41,8 @@ if (!$router) {
     // 1. Jika Action = Sync, Ambil dari Perangkat & Update Cache
     // -----------------------------------------------------------------
     if ($isSyncing) {
+        $pppoeCount = 0;
+        $onuCount = 0;
         $api = new RouterosAPI();
         $api->timeout = 8;
         if ($api->connect($router['ip_address'], $router['api_user'], $router['api_pass'], (int) $router['api_port'])) {
@@ -82,9 +84,10 @@ if (!$router) {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON DUPLICATE KEY UPDATE 
                     service=VALUES(service), caller_id=VALUES(caller_id), address=VALUES(address), 
-                    uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped)
+                    uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped), updated_at=NOW()
                 ');
                 $stmt->execute([$userId, $router['id'], $name, $service, $callerId, $address, $uptime, $lastActive, $status, $mappedOnu]);
+                $pppoeCount++;
             }
             
             foreach ($activeMap as $name => $act) {
@@ -101,9 +104,10 @@ if (!$router) {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON DUPLICATE KEY UPDATE 
                     service=VALUES(service), caller_id=VALUES(caller_id), address=VALUES(address), 
-                    uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped)
+                    uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped), updated_at=NOW()
                 ');
                 $stmt->execute([$userId, $router['id'], $name, $service, $callerId, $address, $uptime, $lastActive, $status, $mappedOnu]);
+                $pppoeCount++;
             }
             
             $currentNames = array_merge(array_column($secretRaw, 'name'), array_keys($activeMap));
@@ -162,8 +166,9 @@ if (!$router) {
                                 $ponOnu = $m[1];
                                 $tx = (float) $m[2];
                                 $rx = (float) $m[3];
-                                $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power)');
+                                $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()');
                                 $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
+                                $onuCount++;
                             }
                         }
                     }
@@ -194,14 +199,15 @@ if (!$router) {
                         if ($tx === null && preg_match('/transmit[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $tx = (float) $m[1];
                         
                         if ($tx !== null || $rx !== null) {
-                            $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power)');
+                            $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()');
                             $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
+                            $onuCount++;
                         }
                     }
                 }
             }
 
-            header('Location: pppoe.php?synced=1');
+            header('Location: pppoe.php?synced=1&pppoe=' . $pppoeCount . '&onu=' . $onuCount);
             exit;
         } else {
             $error = 'Gagal sinkronisasi ke MikroTik: ' . ($api->error ?? 'Periksa pengaturan router.');
@@ -428,8 +434,14 @@ require_once __DIR__ . '/partials/header.php';
                 <div class="alert alert-error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
             <?php endif; ?>
             <?php if (isset($_GET['synced']) && $_GET['synced'] == '1'): ?>
-                <div class="alert alert-success" style="background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: #4ade80; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px;">
-                    ✅ Sinkronisasi data MikroTik dan Sinyal OLT berhasil dilakukan!
+                <?php 
+                $pCount = (int)($_GET['pppoe'] ?? 0);
+                $oCount = (int)($_GET['onu'] ?? 0);
+                ?>
+                <div class="alert alert-success" style="background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: #4ade80; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 13px; line-height: 1.6;">
+                    ✅ <strong>Sinkronisasi Perangkat Berhasil!</strong><br>
+                    • Data PPPoE (MikroTik): <strong><?= $pCount ?></strong> item tersimpan.<br>
+                    • Data Sinyal ONU (OLT): <strong><?= $oCount ?></strong> modem tersimpan.
                 </div>
             <?php endif; ?>
 

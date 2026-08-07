@@ -104,7 +104,7 @@ foreach ($routers as $router) {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE 
                 service=VALUES(service), caller_id=VALUES(caller_id), address=VALUES(address), 
-                uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped)
+                uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped), updated_at=NOW()
             ');
             $stmt->execute([
                 $router['user_id'], $router['id'], $name, $service, $callerId, $address, $uptime, $lastActive, $status, $mappedOnu
@@ -185,7 +185,7 @@ foreach ($olts as $olt) {
                 $stmt = $pdo->prepare('
                     INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power)
                     VALUES (?, ?, ?, ?, ?)
-                    ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power)
+                    ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()
                 ');
                 $stmt->execute([$olt['user_id'], $olt['id'], $ponOnu, $tx, $rx]);
             }
@@ -215,7 +215,7 @@ foreach ($olts as $olt) {
                 $stmt2 = $pdo->prepare('
                     INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power)
                     VALUES (?, ?, ?, ?, ?)
-                    ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power)
+                    ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()
                 ');
                 $stmt2->execute([$olt['user_id'], $olt['id'], $ponOnu, $tx, $rx]);
                 $count++;
