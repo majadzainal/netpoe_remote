@@ -217,6 +217,18 @@ if (!$router) {
     // -----------------------------------------------------------------
     // 2. Load dari Database (Cepat)
     // -----------------------------------------------------------------
+    $signalsMap = [];
+    $stmtSig = $pdo->prepare('
+        SELECT m.pppoe_name, s.tx_power, s.rx_power, s.updated_at
+        FROM olt_pppoe_mappings m
+        JOIN olt_signals_cache s ON m.olt_id = s.olt_id AND m.pon_onu = s.pon_onu
+        WHERE m.user_id = ?
+    ');
+    $stmtSig->execute([$userId]);
+    foreach ($stmtSig->fetchAll() as $sig) {
+        $signalsMap[$sig['pppoe_name']] = $sig;
+    }
+
     $stmt = $pdo->prepare('SELECT * FROM pppoe_clients_cache WHERE router_id = ? ORDER BY name ASC');
     $stmt->execute([$router['id']]);
     $cachedData = $stmt->fetchAll();
@@ -236,6 +248,7 @@ if (!$router) {
             
             // Format ulang caller-id sesuai kebutuhan UI di mana key nya adalah dengan dash (-)
             $row['caller-id'] = $row['caller_id'];
+            $row['signal'] = $signalsMap[$row['name']] ?? null;
             $clientsList[] = $row;
             
             if ($lastSyncTime === '-' && !empty($row['updated_at'])) {
@@ -484,15 +497,16 @@ require_once __DIR__ . '/partials/header.php';
                         <tr>
                             <th class="sortable" onclick="sortTable(0)">Name & Status <span class="sort-icon"></span></th>
                             <th class="sortable" onclick="sortTable(1)">Service & Mapping <span class="sort-icon"></span></th>
-                            <th class="sortable" onclick="sortTable(2)">MAC / IP Address <span class="sort-icon"></span></th>
-                            <th class="sortable" onclick="sortTable(3)">Uptime / Last Active <span class="sort-icon"></span></th>
+                            <th class="sortable" onclick="sortTable(2)">Sinyal ONU <span class="sort-icon"></span></th>
+                            <th class="sortable" onclick="sortTable(3)">MAC / IP Address <span class="sort-icon"></span></th>
+                            <th class="sortable" onclick="sortTable(4)">Uptime / Last Active <span class="sort-icon"></span></th>
                             <th>Aksi</th>
                         </tr>
                     </thead>
                     <tbody id="pppoe-table-body">
                         <?php if ($clientsList === []): ?>
                             <tr class="pppoe-row empty-row">
-                                <td class="empty" colspan="5">Tidak ada data PPPoE client.</td>
+                                <td class="empty" colspan="6">Tidak ada data PPPoE client.</td>
                             </tr>
                         <?php endif; ?>
 
@@ -511,6 +525,27 @@ require_once __DIR__ . '/partials/header.php';
                                         <span style="font-size: 11px; background: rgba(99,102,241,0.2); color: #a5b4fc; padding: 2px 6px; border-radius: 4px;">Mapped: <?= htmlspecialchars($client['mapped'], ENT_QUOTES, 'UTF-8') ?></span>
                                     <?php else: ?>
                                         <span style="font-size: 11px; color: #94a3b8;">Belum di-mapping</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php 
+                                    $sig = $client['signal'] ?? null;
+                                    if ($sig && $sig['rx_power'] !== null):
+                                        $rx = (float)$sig['rx_power'];
+                                        $color = '#22c55e';
+                                        $statusText = 'Normal';
+                                        if ($rx < -27 && $rx >= -30) {
+                                            $color = '#f59e0b';
+                                            $statusText = 'Lemah';
+                                        } elseif ($rx < -30) {
+                                            $color = '#ef4444';
+                                            $statusText = 'Sangat Lemah';
+                                        }
+                                    ?>
+                                        <strong style="color: <?= $color ?>; font-size: 13px;">📶 <?= number_format($rx, 2) ?> dBm</strong><br>
+                                        <span style="font-size: 10px; color: <?= $color ?>; text-transform: uppercase; font-weight: 600;"><?= $statusText ?></span>
+                                    <?php else: ?>
+                                        <span style="color: #94a3b8; font-size: 12px;">—</span>
                                     <?php endif; ?>
                                 </td>
                                 <td>
@@ -538,16 +573,16 @@ require_once __DIR__ . '/partials/header.php';
                                         <?php if ($clientName !== '' && !$isOffline): ?>
                                             <button
                                                 class="btn-signal"
-                                                onclick="openSignalModal(<?= htmlspecialchars(json_encode($clientName), ENT_QUOTES, 'UTF-8') ?>)"
-                                                title="Cek sinyal optik OLT"
-                                            >📶 Cek Signal</button>
+                                                onclick="openSignalModal(<?= htmlspecialchars(json_encode($clientName), ENT_QUOTES, 'UTF-8') ?>, true)"
+                                                title="Tembak langsung ke OLT sekarang"
+                                            >📶 Cek ke OLT Sekarang</button>
                                         <?php endif; ?>
                                     </div>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
                         <tr id="search-empty-row" style="display: none;">
-                            <td class="empty" colspan="5">Data tidak ditemukan.</td>
+                            <td class="empty" colspan="6">Data tidak ditemukan.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -779,7 +814,7 @@ require_once __DIR__ . '/partials/header.php';
         document.getElementById('pppoe-result-count').textContent = 'Menampilkan: ' + count + ' client';
     }
 
-    let sortOrders = [1, 1, 1, 1]; // 1 for asc, -1 for desc
+    let sortOrders = [1, 1, 1, 1, 1]; // 1 for asc, -1 for desc
 
     function sortTable(colIndex) {
         const tbody = document.getElementById('pppoe-table-body');
