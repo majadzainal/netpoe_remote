@@ -26,7 +26,23 @@ $manualCommand = trim($_GET['command'] ?? '');
 $manualOutput = '';
 
 $pdo->exec(
+    "CREATE TABLE IF NOT EXISTS sync_logs (
+      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      user_id INT UNSIGNED NOT NULL,
+      olt_id INT UNSIGNED NULL,
+      source ENUM('cron', 'web') NOT NULL DEFAULT 'cron',
+      status ENUM('success', 'error', 'warning', 'info') NOT NULL DEFAULT 'info',
+      message VARCHAR(255) NOT NULL,
+      details TEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_sync_logs_user_date (user_id, created_at),
+      INDEX idx_sync_logs_olt (olt_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+);
+
+$pdo->exec(
     "CREATE TABLE IF NOT EXISTS olt_pppoe_mappings (
+
       id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
       user_id INT UNSIGNED NOT NULL,
       olt_id INT UNSIGNED NOT NULL,

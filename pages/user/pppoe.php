@@ -16,6 +16,33 @@ $totalSecrets = 0;
 $totalActive  = 0;
 $totalOffline = 0;
 
+$pdo->exec("
+    CREATE TABLE IF NOT EXISTS sync_logs (
+      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      user_id INT UNSIGNED NOT NULL,
+      olt_id INT UNSIGNED NULL,
+      source ENUM('cron', 'web') NOT NULL DEFAULT 'cron',
+      status ENUM('success', 'error', 'warning', 'info') NOT NULL DEFAULT 'info',
+      message VARCHAR(255) NOT NULL,
+      details TEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_sync_logs_user_date (user_id, created_at),
+      INDEX idx_sync_logs_olt (olt_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+
+if (!function_exists('addWebSyncLog')) {
+    function addWebSyncLog(PDO $pdo, int $userId, ?int $oltId, string $source, string $status, string $message, ?string $details = null): void {
+        try {
+            $stmt = $pdo->prepare('
+                INSERT INTO sync_logs (user_id, olt_id, source, status, message, details)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ');
+            $stmt->execute([$userId, $oltId, $source, $status, $message, $details]);
+        } catch (Throwable $e) {}
+    }
+}
+
 $stmt = $pdo->prepare('SELECT pppoe_name, pon_onu FROM olt_pppoe_mappings WHERE user_id = :user_id');
 $stmt->execute(['user_id' => $userId]);
 $mappings = [];
@@ -118,6 +145,8 @@ if (!$router) {
             }
             $api->disconnect();
 
+            addWebSyncLog($pdo, $userId, null, 'web', 'success', "Sync Manual Web: MikroTik berhasil ($pppoeCount client synced).");
+
             // -------------------------------------------------------------
             // Sync OLT Signals for this user
             // -------------------------------------------------------------
@@ -147,63 +176,76 @@ if (!$router) {
             }
 
             foreach ($olts as $o) {
-                $telnet = new OltTelnet();
-                $profile = null;
-                foreach ($profiles as $p) {
-                    if (strcasecmp($p['brand'], $o['brand']) === 0 && strcasecmp($p['model'], $o['model']) === 0) {
-                        $profile = $p; break;
+                try {
+                    $telnet = new OltTelnet();
+                    $profile = null;
+                    foreach ($profiles as $p) {
+                        if (strcasecmp($p['brand'], $o['brand']) === 0 && strcasecmp($p['model'], $o['model']) === 0) {
+                            $profile = $p; break;
+                        }
                     }
-                }
-                
-                $brand = strtolower($o['brand']);
-                if ($brand === 'hsgq') {
-                    $raw = $telnet->runCommands($o['ip_address'], (int)$o['telnet_port'], $o['telnet_user'], $o['telnet_pass'], ['enable', 'configure', 'show ont-optical all'], 20);
-                    if ($raw) {
-                        $lines = explode("\n", $raw);
-                        foreach ($lines as $line) {
-                            $line = trim($line);
-                            if (preg_match('/^(\d+\/\d+)\s+\S+\s+\d+\s+C\s+[\d.]+\s+V\s+[\d.]+\s+mA\s+([-+]?[\d.]+)\s+dBm\s+([-+]?[\d.]+)\s+dBm/', $line, $m)) {
-                                $ponOnu = $m[1];
-                                $tx = (float) $m[2];
-                                $rx = (float) $m[3];
+                    
+                    $brand = strtolower($o['brand']);
+                    $singleOltCount = 0;
+
+                    if ($brand === 'hsgq') {
+                        $raw = $telnet->runCommands($o['ip_address'], (int)$o['telnet_port'], $o['telnet_user'], $o['telnet_pass'], ['enable', 'configure', 'show ont-optical all'], 20);
+                        if ($raw) {
+                            $lines = explode("\n", $raw);
+                            foreach ($lines as $line) {
+                                $line = trim($line);
+                                if (preg_match('/^(\d+\/\d+)\s+\S+\s+\d+\s+C\s+[\d.]+\s+V\s+[\d.]+\s+mA\s+([-+]?[\d.]+)\s+dBm\s+([-+]?[\d.]+)\s+dBm/', $line, $m)) {
+                                    $ponOnu = $m[1];
+                                    $tx = (float) $m[2];
+                                    $rx = (float) $m[3];
+                                    $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()');
+                                    $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
+                                    $onuCount++;
+                                    $singleOltCount++;
+                                }
+                            }
+                        }
+                        addWebSyncLog($pdo, $userId, (int)$o['id'], 'web', 'success', "Sync Manual Web: OLT '{$o['olt_name']}' (HSGQ) berhasil ($singleOltCount ONU).");
+                    } else {
+                        $stmtMapped = $pdo->prepare('SELECT DISTINCT pon_onu FROM olt_pppoe_mappings WHERE olt_id = ?');
+                        $stmtMapped->execute([$o['id']]);
+                        $mappedOnus = $stmtMapped->fetchAll(PDO::FETCH_COLUMN);
+                        
+                        $optCmdBase = '';
+                        if ($profile && isset($profile['commands']['optical_power'])) {
+                            $val = $profile['commands']['optical_power'];
+                            $optCmdBase = is_array($val) ? trim((string)$val[0]) : trim((string)$val);
+                        } else {
+                            $optCmdBase = $o['optical_command'];
+                        }
+                        
+                        if (!$optCmdBase) {
+                            addWebSyncLog($pdo, $userId, (int)$o['id'], 'web', 'warning', "Sync Manual Web: OLT '{$o['olt_name']}': Optical command belum dikonfigurasi.");
+                            continue;
+                        }
+                        
+                        foreach ($mappedOnus as $ponOnu) {
+                            $cmd = str_replace('{pon_onu}', $ponOnu, $optCmdBase);
+                            $seq = scApplyModePPPoE($o, array_map('trim', explode('|', $cmd)));
+                            $raw = $telnet->runCommands($o['ip_address'], (int)$o['telnet_port'], $o['telnet_user'], $o['telnet_pass'], $seq, 5);
+                            
+                            $tx = null; $rx = null;
+                            if (preg_match('/\btx(?:power)?\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', (string)$raw, $m)) $tx = (float) $m[1];
+                            if (preg_match('/\brx(?:power)?\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', (string)$raw, $m)) $rx = (float) $m[1];
+                            if ($rx === null && preg_match('/receive[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', (string)$raw, $m)) $rx = (float) $m[1];
+                            if ($tx === null && preg_match('/transmit[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', (string)$raw, $m)) $tx = (float) $m[1];
+                            
+                            if ($tx !== null || $rx !== null) {
                                 $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()');
                                 $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
                                 $onuCount++;
+                                $singleOltCount++;
                             }
                         }
+                        addWebSyncLog($pdo, $userId, (int)$o['id'], 'web', $singleOltCount > 0 ? 'success' : 'warning', "Sync Manual Web: OLT '{$o['olt_name']}' ({$o['brand']}) selesai ($singleOltCount/" . count($mappedOnus) . " ONU mapped).");
                     }
-                } else {
-                    $stmtMapped = $pdo->prepare('SELECT DISTINCT pon_onu FROM olt_pppoe_mappings WHERE olt_id = ?');
-                    $stmtMapped->execute([$o['id']]);
-                    $mappedOnus = $stmtMapped->fetchAll(PDO::FETCH_COLUMN);
-                    
-                    $optCmdBase = '';
-                    if ($profile && isset($profile['commands']['optical_power'])) {
-                        $val = $profile['commands']['optical_power'];
-                        $optCmdBase = is_array($val) ? trim((string)$val[0]) : trim((string)$val);
-                    } else {
-                        $optCmdBase = $o['optical_command'];
-                    }
-                    
-                    if (!$optCmdBase) continue;
-                    
-                    foreach ($mappedOnus as $ponOnu) {
-                        $cmd = str_replace('{pon_onu}', $ponOnu, $optCmdBase);
-                        $seq = scApplyModePPPoE($o, array_map('trim', explode('|', $cmd)));
-                        $raw = $telnet->runCommands($o['ip_address'], (int)$o['telnet_port'], $o['telnet_user'], $o['telnet_pass'], $seq, 5);
-                        
-                        $tx = null; $rx = null;
-                        if (preg_match('/\btx(?:power)?\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $tx = (float) $m[1];
-                        if (preg_match('/\brx(?:power)?\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $rx = (float) $m[1];
-                        if ($rx === null && preg_match('/receive[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $rx = (float) $m[1];
-                        if ($tx === null && preg_match('/transmit[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $tx = (float) $m[1];
-                        
-                        if ($tx !== null || $rx !== null) {
-                            $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()');
-                            $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
-                            $onuCount++;
-                        }
-                    }
+                } catch (Throwable $e) {
+                    addWebSyncLog($pdo, $userId, (int)$o['id'], 'web', 'error', "Sync Manual Web Error OLT '{$o['olt_name']}': " . $e->getMessage());
                 }
             }
 
@@ -211,11 +253,12 @@ if (!$router) {
             exit;
         } else {
             $error = 'Gagal sinkronisasi ke MikroTik: ' . ($api->error ?? 'Periksa pengaturan router.');
+            addWebSyncLog($pdo, $userId, null, 'web', 'error', "Sync Manual Web Gagal: " . ($api->error ?? 'Gagal koneksi ke MikroTik API'));
         }
     }
 
     // -----------------------------------------------------------------
-    // 2. Load dari Database (Cepat)
+    // 2. Load dari Database (Cepat) & Load Logs
     // -----------------------------------------------------------------
     $signalsMap = [];
     $stmtSig = $pdo->prepare('
@@ -246,7 +289,6 @@ if (!$router) {
                 $totalOffline++;
             }
             
-            // Format ulang caller-id sesuai kebutuhan UI di mana key nya adalah dengan dash (-)
             $row['caller-id'] = $row['caller_id'];
             $row['signal'] = $signalsMap[$row['name']] ?? null;
             $clientsList[] = $row;
@@ -256,7 +298,28 @@ if (!$router) {
             }
         }
     }
+
+    // Fetch latest sync log time to display as last sync time if available
+    $stmtLatestLog = $pdo->prepare('SELECT created_at FROM sync_logs WHERE user_id = ? ORDER BY id DESC LIMIT 1');
+    $stmtLatestLog->execute([$userId]);
+    $latestLogTime = $stmtLatestLog->fetchColumn();
+    if ($latestLogTime) {
+        $lastSyncTime = date('d M Y H:i:s', strtotime((string)$latestLogTime));
+    }
 }
+
+// Fetch Today's Logs for current user
+$stmtLogs = $pdo->prepare('
+    SELECT l.*, o.olt_name, o.brand 
+    FROM sync_logs l
+    LEFT JOIN olts o ON l.olt_id = o.id
+    WHERE l.user_id = ? AND DATE(l.created_at) = CURDATE()
+    ORDER BY l.id DESC
+    LIMIT 50
+');
+$stmtLogs->execute([$userId]);
+$todayLogs = $stmtLogs->fetchAll();
+
 
 if ($search !== '') {
     $keyword = strtolower($search);
@@ -435,12 +498,110 @@ require_once __DIR__ . '/partials/header.php';
         <div style="font-size: 12px; color: var(--clr-muted); margin-bottom: 6px;">
             Terakhir di-sinkronisasi: <strong style="color: #e2e8f0;"><?= htmlspecialchars($lastSyncTime, ENT_QUOTES, 'UTF-8') ?></strong>
         </div>
-        <a href="?action=sync" class="btn btn-primary" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 8px 16px;">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21v-5h5"/></svg>
-            Sync MikroTik & OLT Sekarang
-        </a>
+        <div style="display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <button type="button" onclick="openSyncLogModal()" class="btn" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 8px 14px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15); color: #e2e8f0; border-radius: 6px; cursor: pointer; transition: all 0.2s;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y1="13"/><line x1="16" y1="17" x2="8" y1="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                Log Hari Ini <span style="background: rgba(99,102,241,0.25); color: #a5b4fc; border: 1px solid rgba(99,102,241,0.4); border-radius: 10px; padding: 1px 7px; font-size: 11px; font-weight: 600;"><?= count($todayLogs) ?></span>
+            </button>
+            <a href="?action=sync" class="btn btn-primary" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 8px 16px;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21v-5h5"/></svg>
+                Sync MikroTik & OLT Sekarang
+            </a>
+        </div>
     </div>
 </div>
+
+<!-- Sync Log Pop Up Modal -->
+<div id="syncLogModalOverlay" class="modal-overlay" onclick="if(event.target === this) closeSyncLogModal()">
+    <div class="modal-box" style="width: min(100% - 32px, 640px); max-height: 85vh; display: flex; flex-direction: column; padding: 24px; border: 1px solid rgba(99,102,241,0.4);">
+        <button type="button" class="modal-close" onclick="closeSyncLogModal()">&times;</button>
+        
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid rgba(255,255,255,0.08);">
+            <div style="background: rgba(99,102,241,0.2); border: 1px solid rgba(99,102,241,0.3); border-radius: 10px; width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; color: #a5b4fc;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y1="13"/><line x1="16" y1="17" x2="8" y1="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            </div>
+            <div>
+                <h2 style="margin: 0; font-size: 17px; font-weight: 700; color: #f8fafc;">Log Sinkronisasi Hari Ini</h2>
+                <div style="font-size: 12px; color: #94a3b8; margin-top: 2px;">Tanggal: <strong style="color: #cbd5e1;"><?= date('d M Y') ?></strong> • Khusus Perangkat Akun Anda</div>
+            </div>
+        </div>
+
+        <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px;">
+            <?php if (empty($todayLogs)): ?>
+                <div style="text-align: center; padding: 40px 15px; color: #94a3b8; font-size: 13px; background: rgba(0,0,0,0.18); border-radius: 10px; border: 1px dashed rgba(255,255,255,0.1);">
+                    Belum ada aktivitas sinkronisasi hari ini.<br>Log akan tercatat otomatis saat cron berjalan atau saat Anda memicu Sync Manual.
+                </div>
+            <?php else: ?>
+                <?php foreach ($todayLogs as $log): ?>
+                    <?php 
+                    $bg = 'rgba(255,255,255,0.02)';
+                    $borderColor = 'rgba(255,255,255,0.06)';
+                    $badgeBg = 'rgba(148,163,184,0.15)';
+                    $badgeClr = '#94a3b8';
+                    $badgeText = strtoupper($log['status']);
+                    
+                    if ($log['status'] === 'success') {
+                        $badgeBg = 'rgba(16,185,129,0.18)';
+                        $badgeClr = '#34d399';
+                        $borderColor = 'rgba(16,185,129,0.25)';
+                    } elseif ($log['status'] === 'error') {
+                        $badgeBg = 'rgba(239,68,68,0.18)';
+                        $badgeClr = '#f87171';
+                        $borderColor = 'rgba(239,68,68,0.25)';
+                    } elseif ($log['status'] === 'warning') {
+                        $badgeBg = 'rgba(245,158,11,0.18)';
+                        $badgeClr = '#fbbf24';
+                        $borderColor = 'rgba(245,158,11,0.25)';
+                    } elseif ($log['status'] === 'info') {
+                        $badgeBg = 'rgba(59,130,246,0.18)';
+                        $badgeClr = '#60a5fa';
+                        $borderColor = 'rgba(59,130,246,0.25)';
+                    }
+                    
+                    $sourceLabel = $log['source'] === 'cron' ? '⏰ CRON' : '🌐 MANUAL WEB';
+                    $sourceBg = $log['source'] === 'cron' ? 'rgba(168,85,247,0.15)' : 'rgba(14,165,233,0.15)';
+                    $sourceClr = $log['source'] === 'cron' ? '#c084fc' : '#38bdf8';
+                    ?>
+                    <div style="background: <?= $bg ?>; border: 1px solid <?= $borderColor ?>; border-radius: 10px; padding: 12px 14px; font-size: 13px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                            <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                                <span style="font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: <?= $badgeBg ?>; color: <?= $badgeClr ?>;"><?= $badgeText ?></span>
+                                <span style="font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; background: <?= $sourceBg ?>; color: <?= $sourceClr ?>;"><?= $sourceLabel ?></span>
+                                <?php if (!empty($log['olt_name'])): ?>
+                                    <span style="font-size: 11px; color: #a5b4fc; font-weight: 500; background: rgba(99,102,241,0.1); padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(99,102,241,0.2);"><?= htmlspecialchars($log['olt_name']) ?> (<?= htmlspecialchars($log['brand']) ?>)</span>
+                                <?php endif; ?>
+                            </div>
+                            <span style="font-size: 11px; color: #64748b; font-family: monospace; font-weight: 600;"><?= date('H:i:s', strtotime($log['created_at'])) ?></span>
+                        </div>
+                        <div style="color: #e2e8f0; font-weight: 500; line-height: 1.5;"><?= htmlspecialchars($log['message']) ?></div>
+                        <?php if (!empty($log['details'])): ?>
+                            <div style="margin-top: 8px; font-size: 11px; color: #cbd5e1; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 6px; font-family: monospace; white-space: pre-wrap; word-break: break-word;">
+                                <?= htmlspecialchars($log['details']) ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </div>
+
+        <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); text-align: right;">
+            <button type="button" onclick="closeSyncLogModal()" class="btn btn-secondary" style="font-size: 12px; padding: 6px 18px;">Tutup Modal</button>
+        </div>
+    </div>
+</div>
+
+<script>
+function openSyncLogModal() {
+    var m = document.getElementById('syncLogModalOverlay');
+    if (m) m.classList.add('active');
+}
+function closeSyncLogModal() {
+    var m = document.getElementById('syncLogModalOverlay');
+    if (m) m.classList.remove('active');
+}
+</script>
+
+
     <section class="panel">
 
             <?php if ($error !== ''): ?>
