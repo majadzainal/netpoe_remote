@@ -31,17 +31,21 @@ function formatUptime(string $uptime): string {
     return trim(preg_replace('/([A-Za-z]+)/', '$1 ', $uptime));
 }
 
+$lastSyncTime = '-';
+$isSyncing = isset($_GET['action']) && $_GET['action'] === 'sync';
+
 if (!$router) {
     $error = 'Pengaturan router belum tersedia. Silakan isi pengaturan router terlebih dahulu.';
 } else {
-    $api = new RouterosAPI();
-    $api->timeout = 5;
-
-    try {
+    // -----------------------------------------------------------------
+    // 1. Jika Action = Sync, Ambil dari Perangkat & Update Cache
+    // -----------------------------------------------------------------
+    if ($isSyncing) {
+        $api = new RouterosAPI();
+        $api->timeout = 8;
         if ($api->connect($router['ip_address'], $router['api_user'], $router['api_pass'], (int) $router['api_port'])) {
             $activeRaw = $api->comm('/ppp/active/print');
             $secretRaw = $api->comm('/ppp/secret/print');
-            
             $activeMap = [];
             foreach ($activeRaw as $act) {
                 if (isset($act['!re'])) {
@@ -54,61 +58,184 @@ if (!$router) {
                 $name = $sec['name'] ?? '';
                 if ($name === '') continue;
                 
-                $totalSecrets++;
                 $isActive = isset($activeMap[$name]);
                 $mappedOnu = $mappings[$name] ?? null;
-
+                $service = $sec['service'] ?? 'pppoe';
+                $callerId = $sec['caller-id'] ?? '-';
+                $address = $sec['remote-address'] ?? '-';
+                $uptime = 'Offline';
+                $lastActive = $sec['last-logged-out'] ?? '-';
+                $status = 'offline';
+                
                 if ($isActive) {
-                    $totalActive++;
                     $act = $activeMap[$name];
-                    $clientsList[] = [
-                        'name'    => $name,
-                        'service' => $sec['service'] ?? 'pppoe',
-                        'caller-id' => $act['caller-id'] ?? '-',
-                        'address' => $act['address'] ?? '-',
-                        'uptime'  => formatUptime($act['uptime'] ?? ''),
-                        'last_active' => '-',
-                        'status'  => 'active',
-                        'mapped'  => $mappedOnu
-                    ];
+                    $callerId = $act['caller-id'] ?? '-';
+                    $address = $act['address'] ?? '-';
+                    $uptime = trim(preg_replace('/([A-Za-z]+)/', '$1 ', $act['uptime'] ?? ''));
+                    $lastActive = '-';
+                    $status = 'active';
                     unset($activeMap[$name]);
-                } else {
-                    $totalOffline++;
-                    $clientsList[] = [
-                        'name'    => $name,
-                        'service' => $sec['service'] ?? 'pppoe',
-                        'caller-id' => $sec['caller-id'] ?? '-',
-                        'address' => $sec['remote-address'] ?? '-',
-                        'uptime'  => 'Offline',
-                        'last_active' => $sec['last-logged-out'] ?? '-',
-                        'status'  => 'offline',
-                        'mapped'  => $mappedOnu
-                    ];
                 }
+                
+                $stmt = $pdo->prepare('
+                    INSERT INTO pppoe_clients_cache (user_id, router_id, name, service, caller_id, address, uptime, last_active, status, mapped)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE 
+                    service=VALUES(service), caller_id=VALUES(caller_id), address=VALUES(address), 
+                    uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped)
+                ');
+                $stmt->execute([$userId, $router['id'], $name, $service, $callerId, $address, $uptime, $lastActive, $status, $mappedOnu]);
             }
             
-            // Any active client that doesn't have a secret
             foreach ($activeMap as $name => $act) {
-                $totalActive++;
-                $clientsList[] = [
-                    'name'    => $name,
-                    'service' => $act['service'] ?? 'pppoe',
-                    'caller-id' => $act['caller-id'] ?? '-',
-                    'address' => $act['address'] ?? '-',
-                    'uptime'  => formatUptime($act['uptime'] ?? ''),
-                    'last_active' => '-',
-                    'status'  => 'active',
-                    'mapped'  => $mappings[$name] ?? null
-                ];
+                $service = $act['service'] ?? 'pppoe';
+                $callerId = $act['caller-id'] ?? '-';
+                $address = $act['address'] ?? '-';
+                $uptime = trim(preg_replace('/([A-Za-z]+)/', '$1 ', $act['uptime'] ?? ''));
+                $lastActive = '-';
+                $status = 'active';
+                $mappedOnu = $mappings[$name] ?? null;
+                
+                $stmt = $pdo->prepare('
+                    INSERT INTO pppoe_clients_cache (user_id, router_id, name, service, caller_id, address, uptime, last_active, status, mapped)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE 
+                    service=VALUES(service), caller_id=VALUES(caller_id), address=VALUES(address), 
+                    uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped)
+                ');
+                $stmt->execute([$userId, $router['id'], $name, $service, $callerId, $address, $uptime, $lastActive, $status, $mappedOnu]);
+            }
+            
+            $currentNames = array_merge(array_column($secretRaw, 'name'), array_keys($activeMap));
+            if (!empty($currentNames)) {
+                $placeholders = implode(',', array_fill(0, count($currentNames), '?'));
+                $delStmt = $pdo->prepare("DELETE FROM pppoe_clients_cache WHERE router_id = ? AND name NOT IN ($placeholders)");
+                $delStmt->execute(array_merge([$router['id']], $currentNames));
+            }
+            $api->disconnect();
+
+            // -------------------------------------------------------------
+            // Sync OLT Signals for this user
+            // -------------------------------------------------------------
+            require_once __DIR__ . '/../../libs/OltTelnet.php';
+            require_once __DIR__ . '/../../libs/OltProfiles.php';
+            
+            $stmtOlt = $pdo->prepare('SELECT * FROM olts WHERE user_id = ?');
+            $stmtOlt->execute([$userId]);
+            $olts = $stmtOlt->fetchAll();
+            $profiles = loadOltProfiles();
+            
+            if (!function_exists('scApplyModePPPoE')) {
+                function scApplyModePPPoE(array $olt, array $seq): array {
+                    $brand = strtolower((string) ($olt['brand'] ?? ''));
+                    if ($brand === 'hioso' && strtolower($seq[0] ?? '') !== 'enable') {
+                        array_unshift($seq, 'enable');
+                    }
+                    if ($brand === 'ha7302cst') {
+                        $prefix = ['enable', 'configure terminal', 'epon'];
+                        $existing = array_map('strtolower', $seq);
+                        foreach (array_reverse($prefix) as $cmd) {
+                            if (!in_array($cmd, $existing, true)) array_unshift($seq, $cmd);
+                        }
+                    }
+                    return $seq;
+                }
             }
 
-            $api->disconnect();
+            foreach ($olts as $o) {
+                $telnet = new OltTelnet();
+                $profile = null;
+                foreach ($profiles as $p) {
+                    if (strcasecmp($p['brand'], $o['brand']) === 0 && strcasecmp($p['model'], $o['model']) === 0) {
+                        $profile = $p; break;
+                    }
+                }
+                
+                $brand = strtolower($o['brand']);
+                if ($brand === 'hsgq') {
+                    $raw = $telnet->runCommands($o['ip_address'], (int)$o['telnet_port'], $o['telnet_user'], $o['telnet_pass'], ['enable', 'configure', 'show ont-optical all'], 20);
+                    if ($raw) {
+                        $lines = explode("\n", $raw);
+                        foreach ($lines as $line) {
+                            $line = trim($line);
+                            if (preg_match('/^(\d+\/\d+)\s+\S+\s+\d+\s+C\s+[\d.]+\s+V\s+[\d.]+\s+mA\s+([-+]?[\d.]+)\s+dBm\s+([-+]?[\d.]+)\s+dBm/', $line, $m)) {
+                                $ponOnu = $m[1];
+                                $tx = (float) $m[2];
+                                $rx = (float) $m[3];
+                                $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power)');
+                                $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
+                            }
+                        }
+                    }
+                } else {
+                    $stmtMapped = $pdo->prepare('SELECT DISTINCT pon_onu FROM olt_pppoe_mappings WHERE olt_id = ?');
+                    $stmtMapped->execute([$o['id']]);
+                    $mappedOnus = $stmtMapped->fetchAll(PDO::FETCH_COLUMN);
+                    
+                    $optCmdBase = '';
+                    if ($profile && isset($profile['commands']['optical_power'])) {
+                        $val = $profile['commands']['optical_power'];
+                        $optCmdBase = is_array($val) ? trim((string)$val[0]) : trim((string)$val);
+                    } else {
+                        $optCmdBase = $o['optical_command'];
+                    }
+                    
+                    if (!$optCmdBase) continue;
+                    
+                    foreach ($mappedOnus as $ponOnu) {
+                        $cmd = str_replace('{pon_onu}', $ponOnu, $optCmdBase);
+                        $seq = scApplyModePPPoE($o, array_map('trim', explode('|', $cmd)));
+                        $raw = $telnet->runCommands($o['ip_address'], (int)$o['telnet_port'], $o['telnet_user'], $o['telnet_pass'], $seq, 5);
+                        
+                        $tx = null; $rx = null;
+                        if (preg_match('/\btx(?:power)?\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $tx = (float) $m[1];
+                        if (preg_match('/\brx(?:power)?\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $rx = (float) $m[1];
+                        if ($rx === null && preg_match('/receive[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $rx = (float) $m[1];
+                        if ($tx === null && preg_match('/transmit[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', $raw, $m)) $tx = (float) $m[1];
+                        
+                        if ($tx !== null || $rx !== null) {
+                            $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power)');
+                            $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
+                        }
+                    }
+                }
+            }
+
+            header('Location: pppoe.php?synced=1');
+            exit;
         } else {
-            $error = 'Gagal terhubung ke API MikroTik: ' . ($api->error ?? 'Periksa pengaturan router.');
+            $error = 'Gagal sinkronisasi ke MikroTik: ' . ($api->error ?? 'Periksa pengaturan router.');
         }
-    } catch (Throwable $exception) {
-        $api->disconnect();
-        $error = 'Gagal mengambil data PPPoE: ' . $exception->getMessage();
+    }
+
+    // -----------------------------------------------------------------
+    // 2. Load dari Database (Cepat)
+    // -----------------------------------------------------------------
+    $stmt = $pdo->prepare('SELECT * FROM pppoe_clients_cache WHERE router_id = ? ORDER BY name ASC');
+    $stmt->execute([$router['id']]);
+    $cachedData = $stmt->fetchAll();
+    
+    if (empty($cachedData)) {
+        if (!$isSyncing) {
+            $error = "Data belum tersedia di database. Klik tombol 'Sync Now' untuk mengambil data dari MikroTik.";
+        }
+    } else {
+        foreach ($cachedData as $row) {
+            $totalSecrets++;
+            if ($row['status'] === 'active') {
+                $totalActive++;
+            } else {
+                $totalOffline++;
+            }
+            
+            // Format ulang caller-id sesuai kebutuhan UI di mana key nya adalah dengan dash (-)
+            $row['caller-id'] = $row['caller_id'];
+            $clientsList[] = $row;
+            
+            if ($lastSyncTime === '-' && !empty($row['updated_at'])) {
+                $lastSyncTime = date('d M Y H:i:s', strtotime($row['updated_at']));
+            }
+        }
     }
 }
 
@@ -280,12 +407,30 @@ require_once __DIR__ . '/partials/header.php';
 </style>
 
 <div class="page-wrap">
-<p class="page-heading">Data PPPoE Client</p>
-<p class="page-sub">Daftar klien PPPoE beserta status koneksi dan mapping ONU.</p>
+<div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 24px; flex-wrap: wrap; gap: 16px;">
+    <div>
+        <p class="page-heading" style="margin-bottom: 4px;">Data PPPoE Client</p>
+        <p class="page-sub">Daftar klien PPPoE beserta status koneksi dan mapping ONU.</p>
+    </div>
+    <div style="text-align: right;">
+        <div style="font-size: 12px; color: var(--clr-muted); margin-bottom: 6px;">
+            Terakhir di-sinkronisasi: <strong style="color: #e2e8f0;"><?= htmlspecialchars($lastSyncTime, ENT_QUOTES, 'UTF-8') ?></strong>
+        </div>
+        <a href="?action=sync" class="btn btn-primary" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 8px 16px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21v-5h5"/></svg>
+            Sync MikroTik & OLT Sekarang
+        </a>
+    </div>
+</div>
     <section class="panel">
 
             <?php if ($error !== ''): ?>
                 <div class="alert alert-error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
+            <?php endif; ?>
+            <?php if (isset($_GET['synced']) && $_GET['synced'] == '1'): ?>
+                <div class="alert alert-success" style="background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: #4ade80; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px;">
+                    ✅ Sinkronisasi data MikroTik dan Sinyal OLT berhasil dilakukan!
+                </div>
             <?php endif; ?>
 
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
@@ -460,8 +605,11 @@ require_once __DIR__ . '/partials/header.php';
                 </div>
             </div>
 
-            <div class="cmd-info">
-                Command: <code id="rCmd">—</code>
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <div class="cmd-info" style="margin-bottom: 0;">
+                    Command: <code id="rCmd">—</code>
+                </div>
+                <button id="btnForceRefresh" class="btn btn-primary" style="font-size: 12px; padding: 6px 12px; display: none; background: #6366f1; border: none; border-radius: 6px; color: #fff; cursor: pointer;">Refresh Langsung OLT</button>
             </div>
         </div>
     </div>
@@ -537,11 +685,23 @@ require_once __DIR__ . '/partials/header.php';
         document.getElementById('rRxBadge').textContent  = (d.rx_cat.emoji + ' ' + d.rx_cat.label);
         document.getElementById('rRxBadge').style.color  = d.rx_cat.color;
         document.getElementById('rRxVal').style.color    = d.rx_cat.color;
+
+        const btnRefresh = document.getElementById('btnForceRefresh');
+        if (d.is_cached) {
+            document.getElementById('rCmd').textContent = 'Cache (' + d.cached_updated_at + ')';
+            btnRefresh.style.display = 'block';
+            btnRefresh.onclick = () => openSignalModal(d.pppoe_name, true);
+        } else {
+            document.getElementById('rCmd').textContent = d.command_used || '—';
+            btnRefresh.style.display = 'none';
+        }
     }
 
-    async function openSignalModal(pppoeName) {
-        modal.classList.add('active');
-        document.body.style.overflow = 'hidden';
+    async function openSignalModal(pppoeName, forceRefresh = false) {
+        if (!forceRefresh) {
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
         showLoading();
 
         // AbortController: batalkan request jika > 35 detik (hindari nginx timeout)
@@ -549,7 +709,7 @@ require_once __DIR__ . '/partials/header.php';
         const timeoutId  = setTimeout(() => controller.abort(), 35000);
 
         try {
-            const url = `signal_check.php?pppoe=${encodeURIComponent(pppoeName)}`;
+            const url = `signal_check.php?pppoe=${encodeURIComponent(pppoeName)}&force_refresh=${forceRefresh ? '1' : '0'}`;
             const res = await fetch(url, { signal: controller.signal });
             clearTimeout(timeoutId);
             const body = await res.text();

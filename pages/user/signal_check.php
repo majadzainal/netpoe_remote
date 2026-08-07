@@ -151,19 +151,44 @@ function scParseFromAllOutput(string $output, string $ponOnu): array
     return ['tx' => null, 'rx' => null, 'found' => false];
 }
 
-// ── Pre-check: coba connect TCP dulu (timeout 5 detik) ────────────────────
-$preSocket = @fsockopen($olt['ip_address'], (int) $olt['telnet_port'], $preErrno, $preErrStr, 5);
-if (!is_resource($preSocket)) {
-    $errMsg = $preErrStr ?: 'Connection refused';
-    echo json_encode([
-        'ok'    => false,
-        'error' => "Gagal terhubung ke OLT ({$olt['ip_address']}:{$olt['telnet_port']}): {$errMsg}. Pastikan OLT online dan port telnet terbuka.",
-    ]);
-    exit;
-}
-fclose($preSocket);
+// ── Cek Cache Sinyal ──────────────────────────────────────────────────────
+$forceRefresh = ($_GET['force_refresh'] ?? '0') === '1';
+$isCached = false;
+$cachedUpdatedAt = '';
 
-$telnet  = new OltTelnet();
+$tx      = null;
+$rx      = null;
+$cmdUsed = '';
+$rawOut  = '';
+
+if (!$forceRefresh && $ponOnu !== '') {
+    $stmtCache = $pdo->prepare('SELECT tx_power, rx_power, updated_at FROM olt_signals_cache WHERE olt_id = ? AND pon_onu = ?');
+    $stmtCache->execute([$olt['id'], $ponOnu]);
+    $cachedSignal = $stmtCache->fetch();
+    
+    if ($cachedSignal && ($cachedSignal['tx_power'] !== null || $cachedSignal['rx_power'] !== null)) {
+        $tx = $cachedSignal['tx_power'] !== null ? (float) $cachedSignal['tx_power'] : null;
+        $rx = $cachedSignal['rx_power'] !== null ? (float) $cachedSignal['rx_power'] : null;
+        $isCached = true;
+        $cachedUpdatedAt = date('d M Y H:i:s', strtotime($cachedSignal['updated_at']));
+        $cmdUsed = 'Database Cache';
+    }
+}
+
+if (!$isCached) {
+    // ── Pre-check: coba connect TCP dulu (timeout 5 detik) ────────────────────
+    $preSocket = @fsockopen($olt['ip_address'], (int) $olt['telnet_port'], $preErrno, $preErrStr, 5);
+    if (!is_resource($preSocket)) {
+        $errMsg = $preErrStr ?: 'Connection refused';
+        echo json_encode([
+            'ok'    => false,
+            'error' => "Gagal terhubung ke OLT ({$olt['ip_address']}:{$olt['telnet_port']}): {$errMsg}. Pastikan OLT online dan port telnet terbuka.",
+        ]);
+        exit;
+    }
+    fclose($preSocket);
+
+    $telnet  = new OltTelnet();
 
 // ── Resolve MAC Address ke ONU ID terbaru ─────────────────────────────────
 $macAddress = $mapping['mac_address'] ?? '';
@@ -307,9 +332,18 @@ try {
         $tx     = $parsed['tx'];
         $rx     = $parsed['rx'];
     }
+    if ($tx !== null || $rx !== null) {
+        $stmtCacheUpdate = $pdo->prepare('
+            INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power)
+        ');
+        $stmtCacheUpdate->execute([$userId, (int)$olt['id'], $ponOnu, $tx, $rx]);
+    }
 } catch (Throwable $e) {
     echo json_encode(['ok' => false, 'error' => 'Error: ' . $e->getMessage()]);
     exit;
+}
 }
 
 // ── Kategori kualitas sinyal ──────────────────────────────────────────────
@@ -346,4 +380,6 @@ echo json_encode([
     'rx'           => $rx,
     'tx_cat'       => scSignalCategory($tx, 'tx'),
     'rx_cat'       => scSignalCategory($rx, 'rx'),
+    'is_cached'    => $isCached,
+    'cached_updated_at' => $cachedUpdatedAt,
 ]);
