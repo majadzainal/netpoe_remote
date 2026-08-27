@@ -96,6 +96,126 @@ $stmt = $pdo->prepare('SELECT * FROM olts WHERE user_id = :user_id ORDER BY id A
 $stmt->execute(['user_id' => $userId]);
 $olt = $stmt->fetch();
 
+// -----------------------------------------------------------------
+// AJAX Endpoints untuk Step-by-Step OLT Refresh Modal & Traceroute
+// -----------------------------------------------------------------
+$ajaxAction = $_REQUEST['action'] ?? '';
+if (str_starts_with($ajaxAction, 'ajax_')) {
+    header('Content-Type: application/json');
+
+    if ($ajaxAction === 'ajax_trace_ip') {
+        $ip = trim($_REQUEST['ip'] ?? '');
+        if (!$ip || !filter_var($ip, FILTER_VALIDATE_IP)) {
+            echo json_encode(['success' => false, 'message' => 'IP Address tidak valid untuk traceroute.']);
+            exit;
+        }
+        $isWin = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN');
+        if ($isWin) {
+            $cmd = "tracert -d -h 10 -w 1000 " . escapeshellarg($ip);
+        } else {
+            $cmd = "traceroute -n -m 10 -w 1 " . escapeshellarg($ip);
+        }
+        $output = @shell_exec($cmd);
+        if ($output === null || trim($output) === '') {
+            echo json_encode(['success' => false, 'message' => "Gagal menjalankan traceroute ke $ip (shell_exec terblokir atau command tidak tersedia)."]);
+            exit;
+        }
+        echo json_encode([
+            'success' => true,
+            'ip' => $ip,
+            'output' => trim($output),
+            'message' => "Hasil Traceroute ke $ip:\n\n" . trim($output)
+        ]);
+        exit;
+    }
+
+    if ($ajaxAction === 'ajax_test_olt') {
+        if (!$olt) {
+            echo json_encode(['success' => false, 'message' => 'Pengaturan OLT belum tersedia di database.']);
+            exit;
+        }
+        $ip = $olt['ip_address'];
+        $port = (int) ($olt['telnet_port'] ?: 23);
+        
+        $fp = @fsockopen($ip, $port, $errno, $errstr, 5);
+        if ($fp) {
+            fclose($fp);
+            echo json_encode([
+                'success' => true,
+                'ip' => $ip,
+                'message' => "Koneksi Telnet ke OLT '{$olt['olt_name']}' ($ip:$port) Berhasil!"
+            ]);
+        } else {
+            $errMessage = $errstr ?: 'Connection Timeout / Refused';
+            echo json_encode([
+                'success' => false,
+                'ip' => $ip,
+                'message' => "Gagal terhubung ke OLT '{$olt['olt_name']}' ($ip:$port): $errMessage ($errno)"
+            ]);
+        }
+        exit;
+    }
+
+    if ($ajaxAction === 'ajax_refresh_onu') {
+        if (!$olt) {
+            echo json_encode(['success' => false, 'message' => 'Pengaturan OLT belum tersedia.']);
+            exit;
+        }
+        try {
+            $cacheKey = 'onu_list_' . $userId . '_' . (int) $olt['id'];
+            unset($_SESSION[$cacheKey]);
+
+            $ponPortCount = max(1, (int) ($olt['pon_port_count'] ?? 4));
+            $brand        = strtolower((string) ($olt['brand'] ?? ''));
+            $telnet       = new OltTelnet();
+
+            $freshOnuListOutput = '';
+            $freshOnuListCommandUsed = '';
+
+            if ($brand === 'hioso') {
+                $ponCommands = [];
+                for ($port = 1; $port <= $ponPortCount; $port++) {
+                    $ponCommands[] = "show onu info epon 0/{$port} all";
+                }
+                $sequence = applyOltCommandMode($olt, $ponCommands);
+                $rawAll   = $telnet->runCommands($olt['ip_address'], (int)$olt['telnet_port'], $olt['telnet_user'], $olt['telnet_pass'], $sequence, 15);
+                $freshOnuListOutput = $rawAll;
+                $freshOnuListCommandUsed = implode(', ', $ponCommands);
+            } else {
+                $configuredCommands = splitOltCommands((string) ($olt['onu_list_command'] ?? ''));
+                if (empty($configuredCommands)) {
+                    $configuredCommands = ['show onu all', 'show ont-optical all', 'show epon onu all'];
+                }
+                [$freshOnuListOutput, $freshOnuListCommandUsed] = runAllUsefulOltCommands($telnet, $olt, $configuredCommands, 15);
+            }
+
+            if (!isUsefulTelnetOutput($freshOnuListOutput)) {
+                echo json_encode(['success' => false, 'message' => 'Gagal mengambil data dari OLT. Response Telnet kosong atau command tidak didukung.']);
+                exit;
+            }
+
+            $_SESSION[$cacheKey] = [
+                'output'     => $freshOnuListOutput,
+                'command'    => $freshOnuListCommandUsed,
+                'expires_at' => time() + 300,
+            ];
+
+            $rows = parseOnuList($freshOnuListOutput);
+            $count = count($rows);
+
+            echo json_encode([
+                'success' => true,
+                'count'   => $count,
+                'ip'      => $olt['ip_address'],
+                'message' => "Berhasil me-refresh data ONU ($count ONU ditemukan) dari OLT '{$olt['olt_name']}'."
+            ]);
+        } catch (Throwable $e) {
+            echo json_encode(['success' => false, 'message' => 'Gagal refresh ONU: ' . $e->getMessage()]);
+        }
+        exit;
+    }
+}
+
 $activeClients = [];
 $routerCacheKey = 'active_pppoe_' . $userId;
 
@@ -787,6 +907,25 @@ canvas { border-radius: 8px; }
 .map-table .actions { display:flex; gap:6px; flex-wrap:nowrap; }
 .map-table .actions form { flex:0 0 auto; }
 .map-table .actions .button { flex:0 0 auto; }
+/* Step Badge & Action Styles */
+.step-badge { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 12px; }
+.step-badge.pending { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }
+.step-badge.loading { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
+.step-badge.success { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+.step-badge.error   { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+.step-badge.skipped { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+
+.step-msg.success { background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; display: block !important; }
+.step-msg.error   { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; display: block !important; }
+
+.btn-step-action { font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 6px; cursor: pointer; transition: all 0.2s ease; }
+.btn-step-action.retry { background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.4); color: #93c5fd; }
+.btn-step-action.retry:hover { background: rgba(59, 130, 246, 0.35); }
+.btn-step-action.skip  { background: rgba(245, 158, 11, 0.2); border: 1px solid rgba(245, 158, 11, 0.4); color: #fde047; }
+.btn-step-action.skip:hover  { background: rgba(245, 158, 11, 0.35); }
+.btn-step-action.trace { background: rgba(168, 85, 247, 0.2); border: 1px solid rgba(168, 85, 247, 0.4); color: #c084fc; }
+.btn-step-action.trace:hover { background: rgba(168, 85, 247, 0.35); }
+
 @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .inline-form { flex-direction: column; } }
 </style>
 <div class="page-wrap">
@@ -908,9 +1047,69 @@ canvas { border-radius: 8px; }
                     </p>
                 <?php endif; ?>
 
+            <!-- Interactive Step-by-Step OLT Refresh Modal -->
+            <div class="modal-overlay" id="oltRefreshModal" onclick="if(event.target === this) closeOltRefreshModal()">
+                <div class="modal-box" style="max-width: 580px;">
+                    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid var(--clr-border);">
+                        <div style="background: rgba(99,102,241,0.2); border: 1px solid rgba(99,102,241,0.4); border-radius: 10px; width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; color: #818cf8;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21v-5h5"/></svg>
+                        </div>
+                        <div>
+                            <h3 style="margin: 0; font-size: 17px; font-weight: 700; color: var(--clr-text);">Refresh Data ONU OLT</h3>
+                            <div style="font-size: 12px; color: #94a3b8; margin-top: 2px;">Uji koneksi & ambil data terbaru dari OLT</div>
+                        </div>
+                    </div>
+
+                    <div style="display: flex; flex-direction: column; gap: 14px;">
+                        
+                        <!-- Step 1: Test OLT -->
+                        <div id="oltStep1" style="background: rgba(255,255,255,0.03); border: 1px solid var(--clr-border); border-radius: 10px; padding: 14px 16px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; color: var(--clr-text);">
+                                    <span style="background: rgba(99,102,241,0.2); color: #a5b4fc; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;">1</span>
+                                    <span>1. Test Koneksi ke OLT</span>
+                                </div>
+                                <span id="oltStep1Badge" class="step-badge pending">Menunggu</span>
+                            </div>
+                            <div id="oltStep1Msg" class="step-msg" style="display: none; margin-top: 10px; font-size: 13px; padding: 10px; border-radius: 6px;"></div>
+                            <div id="oltStep1Actions" style="display: none; margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+                                <button type="button" onclick="runOltTraceroute('1', currentOltIp)" class="btn-step-action trace">🌐 Test Koneksi (Traceroute)</button>
+                                <button type="button" onclick="runOltStep1()" class="btn-step-action retry">🔄 Ulangi Test OLT</button>
+                                <button type="button" onclick="closeOltRefreshModal()" class="btn-step-action skip">➡️ Skip & Tutup</button>
+                            </div>
+                        </div>
+
+                        <!-- Step 2: Sync ONU -->
+                        <div id="oltStep2" style="background: rgba(255,255,255,0.03); border: 1px solid var(--clr-border); border-radius: 10px; padding: 14px 16px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; color: var(--clr-text);">
+                                    <span style="background: rgba(99,102,241,0.2); color: #a5b4fc; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;">2</span>
+                                    <span>2. Sync ONU Sinyal OLT</span>
+                                </div>
+                                <span id="oltStep2Badge" class="step-badge pending">Menunggu</span>
+                            </div>
+                            <div id="oltStep2Msg" class="step-msg" style="display: none; margin-top: 10px; font-size: 13px; padding: 10px; border-radius: 6px;"></div>
+                            <div id="oltStep2Actions" style="display: none; margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+                                <button type="button" onclick="runOltTraceroute('2', currentOltIp)" class="btn-step-action trace">🌐 Test Koneksi (Traceroute)</button>
+                                <button type="button" onclick="runOltStep2()" class="btn-step-action retry">🔄 Ulangi Sync ONU</button>
+                                <button type="button" onclick="closeOltRefreshModal()" class="btn-step-action skip">➡️ Skip & Tutup</button>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <div class="modal-actions" style="margin-top: 20px;">
+                        <button type="button" class="button btn-secondary" onclick="closeOltRefreshModal()">Tutup</button>
+                        <button type="button" id="btnFinishOltRefresh" onclick="finishOltRefresh()" class="button" style="display: none;">
+                            🔄 Selesai & Muat Ulang Halaman
+                        </button>
+                    </div>
+                </div>
+            </div>
+
                 <p>
                     <a class="button" href="?view=onu_list">Ambil List ONU</a>
-                    <a class="button btn-secondary" href="?view=onu_list&amp;refresh_onu=1">Refresh dari OLT</a>
+                    <button type="button" onclick="startOltRefreshModal()" class="button btn-secondary" style="cursor: pointer;">Refresh dari OLT</button>
                 </p>
 
                 <form class="inline-form" method="get" action="">
@@ -1233,6 +1432,131 @@ canvas { border-radius: 8px; }
             { label: 'TX', value: tx, color: '#6366f1' },
             { label: 'RX', value: rx, color: '#10b981' },
         ]);
+
+        // -------------------------------------------------------------
+        // Step-by-Step OLT Refresh Modal Controller JS
+        // -------------------------------------------------------------
+        let currentOltIp = <?= json_encode($olt['ip_address'] ?? '') ?>;
+
+        function escapeOltHtml(str) {
+            if (!str) return '';
+            return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+        }
+
+        async function runOltTraceroute(stepNum, ip) {
+            if (!ip) {
+                alert('IP Address OLT tidak ditemukan untuk traceroute.');
+                return;
+            }
+            const msgEl = document.getElementById('oltStep' + stepNum + 'Msg');
+            const existingText = msgEl.innerHTML;
+            msgEl.innerHTML = existingText + '<div id="oltTraceLoading_' + stepNum + '" style="margin-top:8px; color:#c084fc; font-weight:600;">⏳ Sedang melakukan Traceroute ke ' + escapeOltHtml(ip) + ' (maks 10 hop)...</div>';
+            
+            try {
+                const resp = await fetch('olt_monitor.php?action=ajax_trace_ip&ip=' + encodeURIComponent(ip));
+                const res = await resp.json();
+                const loader = document.getElementById('oltTraceLoading_' + stepNum);
+                if (loader) loader.remove();
+
+                if (res.success) {
+                    msgEl.innerHTML = msgEl.innerHTML + 
+                        '<div style="margin-top:8px; font-weight:600; color:#c084fc;">🌐 Hasil Traceroute ke ' + escapeOltHtml(ip) + ':</div>' +
+                        '<pre style="background: rgba(0,0,0,0.4); padding: 8px 10px; border-radius: 6px; font-family: monospace; font-size: 11px; color:#e2e8f0; white-space: pre-wrap; margin-top: 4px; border: 1px solid rgba(168,85,247,0.3); max-height: 200px; overflow-y: auto;">' + 
+                        escapeOltHtml(res.output) + '</pre>';
+                } else {
+                    msgEl.innerHTML = msgEl.innerHTML + '<div style="margin-top:8px; color:#f87171;">⚠️ ' + escapeOltHtml(res.message) + '</div>';
+                }
+            } catch (e) {
+                const loader = document.getElementById('oltTraceLoading_' + stepNum);
+                if (loader) loader.remove();
+                msgEl.innerHTML = msgEl.innerHTML + '<div style="margin-top:8px; color:#f87171;">⚠️ Error Traceroute: ' + escapeOltHtml(e.message) + '</div>';
+            }
+        }
+
+        function startOltRefreshModal() {
+            const modal = document.getElementById('oltRefreshModal');
+            modal.classList.add('active');
+            
+            ['1','2'].forEach(num => {
+                const badge = document.getElementById('oltStep' + num + 'Badge');
+                badge.className = 'step-badge pending';
+                badge.textContent = 'Menunggu';
+                const msg = document.getElementById('oltStep' + num + 'Msg');
+                msg.className = 'step-msg';
+                msg.style.display = 'none';
+                msg.textContent = '';
+                const act = document.getElementById('oltStep' + num + 'Actions');
+                act.style.display = 'none';
+            });
+            document.getElementById('btnFinishOltRefresh').style.display = 'none';
+
+            runOltStep1();
+        }
+
+        function closeOltRefreshModal() {
+            document.getElementById('oltRefreshModal').classList.remove('active');
+        }
+
+        function setOltStepState(stepNum, state, text, msgText = '') {
+            const badge = document.getElementById('oltStep' + stepNum + 'Badge');
+            badge.className = 'step-badge ' + state;
+            badge.textContent = text;
+
+            const msg = document.getElementById('oltStep' + stepNum + 'Msg');
+            if (msgText) {
+                msg.className = 'step-msg ' + (state === 'error' ? 'error' : 'success');
+                msg.textContent = msgText;
+                msg.style.display = 'block';
+            } else {
+                msg.style.display = 'none';
+            }
+
+            const act = document.getElementById('oltStep' + stepNum + 'Actions');
+            if (state === 'error') {
+                act.style.display = 'flex';
+            } else {
+                act.style.display = 'none';
+            }
+        }
+
+        async function runOltStep1() {
+            setOltStepState('1', 'loading', 'Memproses...', '');
+            try {
+                const resp = await fetch('olt_monitor.php?action=ajax_test_olt');
+                const res = await resp.json();
+                if (res.ip) currentOltIp = res.ip;
+                if (res.success) {
+                    setOltStepState('1', 'success', 'Berhasil', res.message);
+                    runOltStep2();
+                } else {
+                    setOltStepState('1', 'error', 'Gagal', res.message);
+                }
+            } catch (e) {
+                setOltStepState('1', 'error', 'Gagal', 'Error request: ' + e.message);
+            }
+        }
+
+        async function runOltStep2() {
+            setOltStepState('2', 'loading', 'Memproses...', '');
+            try {
+                const resp = await fetch('olt_monitor.php?action=ajax_refresh_onu');
+                const res = await resp.json();
+                if (res.ip) currentOltIp = res.ip;
+                if (res.success) {
+                    setOltStepState('2', 'success', 'Berhasil', res.message);
+                } else {
+                    setOltStepState('2', 'error', 'Gagal', res.message);
+                }
+            } catch (e) {
+                setOltStepState('2', 'error', 'Gagal', 'Error request: ' + e.message);
+            } finally {
+                document.getElementById('btnFinishOltRefresh').style.display = 'inline-flex';
+            }
+        }
+
+        function finishOltRefresh() {
+            window.location.href = 'olt_monitor.php?view=onu_list';
+        }
     </script>
 </div>
 </body>

@@ -58,6 +58,326 @@ function formatUptime(string $uptime): string {
     return trim(preg_replace('/([A-Za-z]+)/', '$1 ', $uptime));
 }
 
+// -----------------------------------------------------------------
+// AJAX Endpoints untuk Step-by-Step Sync Modal
+// -----------------------------------------------------------------
+$ajaxAction = $_REQUEST['action'] ?? '';
+if (str_starts_with($ajaxAction, 'ajax_')) {
+    header('Content-Type: application/json');
+
+    if ($ajaxAction === 'ajax_trace_ip') {
+        $ip = trim($_REQUEST['ip'] ?? '');
+        if (!$ip || !filter_var($ip, FILTER_VALIDATE_IP)) {
+            echo json_encode(['success' => false, 'message' => 'IP Address tidak valid untuk traceroute.']);
+            exit;
+        }
+        $isWin = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN');
+        if ($isWin) {
+            $cmd = "tracert -d -h 10 -w 1000 " . escapeshellarg($ip);
+        } else {
+            $cmd = "traceroute -n -m 10 -w 1 " . escapeshellarg($ip);
+        }
+        $output = @shell_exec($cmd);
+        if ($output === null || trim($output) === '') {
+            echo json_encode(['success' => false, 'message' => "Gagal menjalankan traceroute ke $ip (shell_exec terblokir atau command tidak tersedia)."]);
+            exit;
+        }
+        echo json_encode([
+            'success' => true,
+            'ip' => $ip,
+            'output' => trim($output),
+            'message' => "Hasil Traceroute ke $ip:\n\n" . trim($output)
+        ]);
+        exit;
+    }
+
+    if ($ajaxAction === 'ajax_test_mikrotik') {
+        if (!$router) {
+            echo json_encode(['success' => false, 'message' => 'Pengaturan router MikroTik belum tersedia.']);
+            exit;
+        }
+        try {
+            $api = new RouterosAPI();
+            $api->timeout = 5;
+            if ($api->connect($router['ip_address'], $router['api_user'], $router['api_pass'], (int) $router['api_port'])) {
+                $api->disconnect();
+                echo json_encode([
+                    'success' => true,
+                    'ip' => $router['ip_address'],
+                    'message' => "Koneksi ke MikroTik ({$router['ip_address']}:{$router['api_port']}) Berhasil!"
+                ]);
+            } else {
+                echo json_encode([
+                    'success' => false,
+                    'ip' => $router['ip_address'],
+                    'message' => "Gagal terhubung ke MikroTik ({$router['ip_address']}:{$router['api_port']}): " . ($api->error ?? 'Connection Timeout / Refused')
+                ]);
+            }
+        } catch (Throwable $e) {
+            echo json_encode([
+                'success' => false,
+                'ip' => $router['ip_address'],
+                'message' => "Error Koneksi MikroTik ({$router['ip_address']}:{$router['api_port']}): " . $e->getMessage()
+            ]);
+        }
+        exit;
+    }
+
+    if ($ajaxAction === 'ajax_sync_mikrotik') {
+        if (!$router) {
+            echo json_encode(['success' => false, 'message' => 'Pengaturan router MikroTik belum tersedia.']);
+            exit;
+        }
+        try {
+            $pppoeCount = 0;
+            $api = new RouterosAPI();
+            $api->timeout = 8;
+            if ($api->connect($router['ip_address'], $router['api_user'], $router['api_pass'], (int) $router['api_port'])) {
+                $activeRaw = $api->comm('/ppp/active/print');
+                $secretRaw = $api->comm('/ppp/secret/print');
+                $activeMap = [];
+                foreach ($activeRaw as $act) {
+                    if (isset($act['!re'])) {
+                        $activeMap[$act['name']] = $act;
+                    }
+                }
+
+                foreach ($secretRaw as $sec) {
+                    if (!isset($sec['!re'])) continue;
+                    $name = $sec['name'] ?? '';
+                    if ($name === '') continue;
+                    
+                    $isActive = isset($activeMap[$name]);
+                    $mappedOnu = $mappings[$name] ?? null;
+                    $service = $sec['service'] ?? 'pppoe';
+                    $callerId = $sec['caller-id'] ?? '-';
+                    $address = $sec['remote-address'] ?? '-';
+                    $uptime = 'Offline';
+                    $lastActive = $sec['last-logged-out'] ?? '-';
+                    $status = 'offline';
+                    
+                    if ($isActive) {
+                        $act = $activeMap[$name];
+                        $callerId = $act['caller-id'] ?? '-';
+                        $address = $act['address'] ?? '-';
+                        $uptime = trim(preg_replace('/([A-Za-z]+)/', '$1 ', $act['uptime'] ?? ''));
+                        $lastActive = '-';
+                        $status = 'active';
+                        unset($activeMap[$name]);
+                    }
+                    
+                    $stmt = $pdo->prepare('
+                        INSERT INTO pppoe_clients_cache (user_id, router_id, name, service, caller_id, address, uptime, last_active, status, mapped)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON DUPLICATE KEY UPDATE 
+                        service=VALUES(service), caller_id=VALUES(caller_id), address=VALUES(address), 
+                        uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped), updated_at=NOW()
+                    ');
+                    $stmt->execute([$userId, $router['id'], $name, $service, $callerId, $address, $uptime, $lastActive, $status, $mappedOnu]);
+                    $pppoeCount++;
+                }
+                
+                foreach ($activeMap as $name => $act) {
+                    $service = $act['service'] ?? 'pppoe';
+                    $callerId = $act['caller-id'] ?? '-';
+                    $address = $act['address'] ?? '-';
+                    $uptime = trim(preg_replace('/([A-Za-z]+)/', '$1 ', $act['uptime'] ?? ''));
+                    $lastActive = '-';
+                    $status = 'active';
+                    $mappedOnu = $mappings[$name] ?? null;
+                    
+                    $stmt = $pdo->prepare('
+                        INSERT INTO pppoe_clients_cache (user_id, router_id, name, service, caller_id, address, uptime, last_active, status, mapped)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON DUPLICATE KEY UPDATE 
+                        service=VALUES(service), caller_id=VALUES(caller_id), address=VALUES(address), 
+                        uptime=VALUES(uptime), last_active=VALUES(last_active), status=VALUES(status), mapped=VALUES(mapped), updated_at=NOW()
+                    ');
+                    $stmt->execute([$userId, $router['id'], $name, $service, $callerId, $address, $uptime, $lastActive, $status, $mappedOnu]);
+                    $pppoeCount++;
+                }
+                
+                $currentNames = array_merge(array_column($secretRaw, 'name'), array_keys($activeMap));
+                if (!empty($currentNames)) {
+                    $placeholders = implode(',', array_fill(0, count($currentNames), '?'));
+                    $delStmt = $pdo->prepare("DELETE FROM pppoe_clients_cache WHERE router_id = ? AND name NOT IN ($placeholders)");
+                    $delStmt->execute(array_merge([$router['id']], $currentNames));
+                }
+                $api->disconnect();
+
+                addWebSyncLog($pdo, $userId, null, 'web', 'success', "Sync Manual Web: MikroTik berhasil ($pppoeCount client synced).");
+
+                echo json_encode([
+                    'success' => true,
+                    'count' => $pppoeCount,
+                    'message' => "Sinkronisasi data PPPoE dari MikroTik Berhasil ($pppoeCount client synced)."
+                ]);
+            } else {
+                $err = $api->error ?? 'Gagal koneksi ke MikroTik API';
+                addWebSyncLog($pdo, $userId, null, 'web', 'error', "Sync Manual Web Gagal MikroTik: " . $err);
+                echo json_encode(['success' => false, 'message' => "Gagal sinkronisasi ke MikroTik: " . $err]);
+            }
+        } catch (Throwable $e) {
+            addWebSyncLog($pdo, $userId, null, 'web', 'error', "Sync Manual Web Error MikroTik: " . $e->getMessage());
+            echo json_encode(['success' => false, 'message' => "Error Sync MikroTik: " . $e->getMessage()]);
+        }
+        exit;
+    }
+
+    if ($ajaxAction === 'ajax_test_olt') {
+        $stmtOlt = $pdo->prepare('SELECT * FROM olts WHERE user_id = ? ORDER BY id ASC LIMIT 1');
+        $stmtOlt->execute([$userId]);
+        $oltConfig = $stmtOlt->fetch();
+        
+        if (!$oltConfig) {
+            echo json_encode(['success' => false, 'message' => 'Pengaturan OLT belum tersedia di database.']);
+            exit;
+        }
+        
+        $ip = $oltConfig['ip_address'];
+        $port = (int) ($oltConfig['telnet_port'] ?: 23);
+        
+        $fp = @fsockopen($ip, $port, $errno, $errstr, 5);
+        if ($fp) {
+            fclose($fp);
+            echo json_encode([
+                'success' => true,
+                'ip' => $ip,
+                'message' => "Koneksi Telnet ke OLT '{$oltConfig['olt_name']}' ($ip:$port) Berhasil!"
+            ]);
+        } else {
+            $errMessage = $errstr ?: 'Connection Timeout / Refused';
+            echo json_encode([
+                'success' => false,
+                'ip' => $ip,
+                'message' => "Gagal terhubung ke OLT '{$oltConfig['olt_name']}' ($ip:$port): $errMessage ($errno)"
+            ]);
+        }
+        exit;
+    }
+
+    if ($ajaxAction === 'ajax_sync_olt') {
+        require_once __DIR__ . '/../../libs/OltTelnet.php';
+        require_once __DIR__ . '/../../libs/OltProfiles.php';
+
+        $stmtOlt = $pdo->prepare('SELECT * FROM olts WHERE user_id = ?');
+        $stmtOlt->execute([$userId]);
+        $olts = $stmtOlt->fetchAll();
+        
+        if (empty($olts)) {
+            echo json_encode(['success' => false, 'message' => 'Pengaturan OLT belum tersedia.']);
+            exit;
+        }
+
+        $profiles = loadOltProfiles();
+        $onuCount = 0;
+        $errors = [];
+
+        if (!function_exists('scApplyModePPPoE')) {
+            function scApplyModePPPoE(array $olt, array $seq): array {
+                $brand = strtolower((string) ($olt['brand'] ?? ''));
+                if ($brand === 'hioso' && strtolower($seq[0] ?? '') !== 'enable') {
+                    array_unshift($seq, 'enable');
+                }
+                if ($brand === 'ha7302cst') {
+                    $prefix = ['enable', 'configure terminal', 'epon'];
+                    $existing = array_map('strtolower', $seq);
+                    foreach (array_reverse($prefix) as $cmd) {
+                        if (!in_array($cmd, $existing, true)) array_unshift($seq, $cmd);
+                    }
+                }
+                return $seq;
+            }
+        }
+
+        foreach ($olts as $o) {
+            try {
+                $telnet = new OltTelnet();
+                $profile = null;
+                foreach ($profiles as $p) {
+                    if (strcasecmp($p['brand'], $o['brand']) === 0 && strcasecmp($p['model'], $o['model']) === 0) {
+                        $profile = $p; break;
+                    }
+                }
+                
+                $brand = strtolower($o['brand']);
+                $singleOltCount = 0;
+
+                if ($brand === 'hsgq') {
+                    $raw = $telnet->runCommands($o['ip_address'], (int)$o['telnet_port'], $o['telnet_user'], $o['telnet_pass'], ['enable', 'configure', 'show ont-optical all'], 20);
+                    if ($raw) {
+                        $lines = explode("\n", $raw);
+                        foreach ($lines as $line) {
+                            $line = trim($line);
+                            if (preg_match('/^(\d+\/\d+)\s+\S+\s+\d+\s+C\s+[\d.]+\s+V\s+[\d.]+\s+mA\s+([-+]?[\d.]+)\s+dBm\s+([-+]?[\d.]+)\s+dBm/', $line, $m)) {
+                                $ponOnu = $m[1];
+                                $tx = (float) $m[2];
+                                $rx = (float) $m[3];
+                                $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()');
+                                $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
+                                $onuCount++;
+                                $singleOltCount++;
+                            }
+                        }
+                    }
+                    addWebSyncLog($pdo, $userId, (int)$o['id'], 'web', 'success', "Sync Manual Web: OLT '{$o['olt_name']}' (HSGQ) berhasil ($singleOltCount ONU).");
+                } else {
+                    $stmtMapped = $pdo->prepare('SELECT DISTINCT pon_onu FROM olt_pppoe_mappings WHERE olt_id = ?');
+                    $stmtMapped->execute([$o['id']]);
+                    $mappedOnus = $stmtMapped->fetchAll(PDO::FETCH_COLUMN);
+                    
+                    $optCmdBase = '';
+                    if ($profile && isset($profile['commands']['optical_power'])) {
+                        $val = $profile['commands']['optical_power'];
+                        $optCmdBase = is_array($val) ? trim((string)$val[0]) : trim((string)$val);
+                    } else {
+                        $optCmdBase = $o['optical_command'];
+                    }
+                    
+                    if (!$optCmdBase) {
+                        addWebSyncLog($pdo, $userId, (int)$o['id'], 'web', 'warning', "Sync Manual Web: OLT '{$o['olt_name']}': Optical command belum dikonfigurasi.");
+                        continue;
+                    }
+                    
+                    foreach ($mappedOnus as $ponOnu) {
+                        $cmd = str_replace('{pon_onu}', $ponOnu, $optCmdBase);
+                        $seq = scApplyModePPPoE($o, array_map('trim', explode('|', $cmd)));
+                        $raw = $telnet->runCommands($o['ip_address'], (int)$o['telnet_port'], $o['telnet_user'], $o['telnet_pass'], $seq, 5);
+                        
+                        $tx = null; $rx = null;
+                        if (preg_match('/\btx(?:power)?\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', (string)$raw, $m)) $tx = (float) $m[1];
+                        if (preg_match('/\brx(?:power)?\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', (string)$raw, $m)) $rx = (float) $m[1];
+                        if ($rx === null && preg_match('/receive[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', (string)$raw, $m)) $rx = (float) $m[1];
+                        if ($tx === null && preg_match('/transmit[^-+0-9]*([-+]?\d+(?:\.\d+)?)/i', (string)$raw, $m)) $tx = (float) $m[1];
+                        
+                        if ($tx !== null || $rx !== null) {
+                            $stmtSync = $pdo->prepare('INSERT INTO olt_signals_cache (user_id, olt_id, pon_onu, tx_power, rx_power) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tx_power=VALUES(tx_power), rx_power=VALUES(rx_power), updated_at=NOW()');
+                            $stmtSync->execute([$userId, $o['id'], $ponOnu, $tx, $rx]);
+                            $onuCount++;
+                            $singleOltCount++;
+                        }
+                    }
+                    addWebSyncLog($pdo, $userId, (int)$o['id'], 'web', $singleOltCount > 0 ? 'success' : 'warning', "Sync Manual Web: OLT '{$o['olt_name']}' ({$o['brand']}) selesai ($singleOltCount/" . count($mappedOnus) . " ONU mapped).");
+                }
+            } catch (Throwable $e) {
+                $errors[] = "OLT '{$o['olt_name']}': " . $e->getMessage();
+                addWebSyncLog($pdo, $userId, (int)$o['id'], 'web', 'error', "Sync Manual Web Error OLT '{$o['olt_name']}': " . $e->getMessage());
+            }
+        }
+
+        if (!empty($errors) && $onuCount === 0) {
+            echo json_encode(['success' => false, 'message' => 'Gagal sync OLT: ' . implode('; ', $errors)]);
+        } else {
+            echo json_encode([
+                'success' => true,
+                'count' => $onuCount,
+                'message' => "Sinkronisasi OLT berhasil ($onuCount sinyal ONU ter-update)." . (!empty($errors) ? " Warning: " . implode('; ', $errors) : "")
+            ]);
+        }
+        exit;
+    }
+}
+
 $lastSyncTime = '-';
 $isSyncing = isset($_GET['action']) && $_GET['action'] === 'sync';
 
@@ -465,6 +785,37 @@ require_once __DIR__ . '/partials/header.php';
 .modal-error .err-icon { font-size: 42px; margin-bottom: 14px; }
 .modal-error p { font-size: 14px; color: #f87171; line-height: 1.6; }
 
+/* ── Step Modal Styles ── */
+.step-badge {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 12px;
+}
+.step-badge.pending { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }
+.step-badge.loading { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
+.step-badge.success { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+.step-badge.error   { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+.step-badge.skipped { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+
+.step-msg.success { background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; display: block !important; }
+.step-msg.error   { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; display: block !important; }
+
+.btn-step-action {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.btn-step-action.retry { background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.4); color: #93c5fd; }
+.btn-step-action.retry:hover { background: rgba(59, 130, 246, 0.35); }
+.btn-step-action.skip  { background: rgba(245, 158, 11, 0.2); border: 1px solid rgba(245, 158, 11, 0.4); color: #fde047; }
+.btn-step-action.skip:hover  { background: rgba(245, 158, 11, 0.35); }
+.btn-step-action.trace { background: rgba(168, 85, 247, 0.2); border: 1px solid rgba(168, 85, 247, 0.4); color: #c084fc; }
+.btn-step-action.trace:hover { background: rgba(168, 85, 247, 0.35); }
+
 /* ── Command info ── */
 .cmd-info {
     background: rgba(0,0,0,0.2);
@@ -503,10 +854,106 @@ require_once __DIR__ . '/partials/header.php';
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y1="13"/><line x1="16" y1="17" x2="8" y1="17"/><polyline points="10 9 9 9 8 9"/></svg>
                 Log Hari Ini <span style="background: rgba(99,102,241,0.25); color: #a5b4fc; border: 1px solid rgba(99,102,241,0.4); border-radius: 10px; padding: 1px 7px; font-size: 11px; font-weight: 600;"><?= count($todayLogs) ?></span>
             </button>
-            <a href="?action=sync" class="btn btn-primary" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 8px 16px;">
+            <button type="button" onclick="startPppoeSyncModal()" class="btn btn-primary" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 8px 16px; border: none; cursor: pointer;">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21v-5h5"/></svg>
                 Sync MikroTik & OLT Sekarang
-            </a>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Interactive Step-by-Step Sync Modal -->
+<div id="pppoeSyncModalOverlay" class="modal-overlay" onclick="if(event.target === this) closePppoeSyncModal()">
+    <div class="modal-box" style="width: min(100% - 32px, 620px); max-height: 85vh; display: flex; flex-direction: column; padding: 24px; border: 1px solid rgba(99,102,241,0.4);">
+        <button type="button" class="modal-close" onclick="closePppoeSyncModal()">&times;</button>
+        
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid rgba(255,255,255,0.08);">
+            <div style="background: rgba(99,102,241,0.2); border: 1px solid rgba(99,102,241,0.4); border-radius: 10px; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; color: #818cf8;">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21v-5h5"/></svg>
+            </div>
+            <div>
+                <h2 style="margin: 0; font-size: 18px; font-weight: 700; color: #f8fafc;">Proses Sinkronisasi MikroTik & OLT</h2>
+                <div style="font-size: 12px; color: #94a3b8; margin-top: 2px;">Pengujian koneksi & sinkronisasi data secara otomatis</div>
+            </div>
+        </div>
+
+        <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 4px;">
+            
+            <!-- Step 1: Test MikroTik -->
+            <div id="syncStep1" class="sync-step-card" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 14px 16px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; color: #e2e8f0;">
+                        <span style="background: rgba(99,102,241,0.2); color: #a5b4fc; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;">1</span>
+                        <span>1. Test Koneksi MikroTik</span>
+                    </div>
+                    <span id="step1Badge" class="step-badge pending">Menunggu</span>
+                </div>
+                <div id="step1Msg" class="step-msg" style="display: none; margin-top: 10px; font-size: 13px; padding: 10px; border-radius: 6px;"></div>
+                <div id="step1Actions" style="display: none; margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+                    <button type="button" onclick="runPppoeTraceroute('1', currentMikrotikIp)" class="btn-step-action trace">🌐 Test Koneksi (Traceroute)</button>
+                    <button type="button" onclick="runPppoeStep1()" class="btn-step-action retry">🔄 Ulangi Test MikroTik</button>
+                    <button type="button" onclick="skipPppoeToOlt()" class="btn-step-action skip">➡️ Skip & Lanjut ke OLT (Proses 3)</button>
+                </div>
+            </div>
+
+            <!-- Step 2: Sync PPPoE -->
+            <div id="syncStep2" class="sync-step-card" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 14px 16px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; color: #e2e8f0;">
+                        <span style="background: rgba(99,102,241,0.2); color: #a5b4fc; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;">2</span>
+                        <span>2. Synchronize Data PPPoE (MikroTik)</span>
+                    </div>
+                    <span id="step2Badge" class="step-badge pending">Menunggu</span>
+                </div>
+                <div id="step2Msg" class="step-msg" style="display: none; margin-top: 10px; font-size: 13px; padding: 10px; border-radius: 6px;"></div>
+                <div id="step2Actions" style="display: none; margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+                    <button type="button" onclick="runPppoeTraceroute('2', currentMikrotikIp)" class="btn-step-action trace">🌐 Test Koneksi (Traceroute)</button>
+                    <button type="button" onclick="runPppoeStep2()" class="btn-step-action retry">🔄 Ulangi Sync MikroTik</button>
+                    <button type="button" onclick="skipPppoeToOlt()" class="btn-step-action skip">➡️ Skip & Lanjut ke OLT (Proses 3)</button>
+                </div>
+            </div>
+
+            <!-- Step 3: Test OLT -->
+            <div id="syncStep3" class="sync-step-card" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 14px 16px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; color: #e2e8f0;">
+                        <span style="background: rgba(99,102,241,0.2); color: #a5b4fc; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;">3</span>
+                        <span>3. Test Koneksi ke OLT</span>
+                    </div>
+                    <span id="step3Badge" class="step-badge pending">Menunggu</span>
+                </div>
+                <div id="step3Msg" class="step-msg" style="display: none; margin-top: 10px; font-size: 13px; padding: 10px; border-radius: 6px;"></div>
+                <div id="step3Actions" style="display: none; margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+                    <button type="button" onclick="runPppoeTraceroute('3', currentOltIp)" class="btn-step-action trace">🌐 Test Koneksi (Traceroute)</button>
+                    <button type="button" onclick="runPppoeStep3()" class="btn-step-action retry">🔄 Ulangi Test OLT</button>
+                    <button type="button" onclick="finishPppoeSync()" class="btn-step-action skip">➡️ Skip & Tutup</button>
+                </div>
+            </div>
+
+            <!-- Step 4: Sync ONU -->
+            <div id="syncStep4" class="sync-step-card" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 14px 16px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; color: #e2e8f0;">
+                        <span style="background: rgba(99,102,241,0.2); color: #a5b4fc; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;">4</span>
+                        <span>4. Sync ONU Sinyal OLT</span>
+                    </div>
+                    <span id="step4Badge" class="step-badge pending">Menunggu</span>
+                </div>
+                <div id="step4Msg" class="step-msg" style="display: none; margin-top: 10px; font-size: 13px; padding: 10px; border-radius: 6px;"></div>
+                <div id="step4Actions" style="display: none; margin-top: 10px; gap: 8px; flex-wrap: wrap;">
+                    <button type="button" onclick="runPppoeTraceroute('4', currentOltIp)" class="btn-step-action trace">🌐 Test Koneksi (Traceroute)</button>
+                    <button type="button" onclick="runPppoeStep4()" class="btn-step-action retry">🔄 Ulangi Sync ONU</button>
+                    <button type="button" onclick="finishPppoeSync()" class="btn-step-action skip">➡️ Skip & Tutup</button>
+                </div>
+            </div>
+
+        </div>
+
+        <div style="margin-top: 20px; pt: 14px; border-top: 1px solid rgba(255,255,255,0.08); display: flex; justify-content: flex-end; gap: 10px;">
+            <button type="button" onclick="closePppoeSyncModal()" class="btn" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15); color: #cbd5e1; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Tutup</button>
+            <button type="button" id="btnFinishPppoeSync" onclick="finishPppoeSync()" class="btn btn-primary" style="display: none; font-size: 13px; padding: 8px 18px;">
+                🔄 Selesai & Muat Ulang Halaman
+            </button>
         </div>
     </div>
 </div>
@@ -1018,6 +1465,172 @@ function closeSyncLogModal() {
         
         // Render ulang
         rows.forEach(row => tbody.appendChild(row));
+    }
+    // -------------------------------------------------------------
+    // Step-by-Step Sync Modal Controller JS
+    // -------------------------------------------------------------
+    let currentMikrotikIp = <?= json_encode($router['ip_address'] ?? '') ?>;
+    let currentOltIp = '';
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+
+    async function runPppoeTraceroute(stepNum, ip) {
+        if (!ip) {
+            alert('IP Address tidak ditemukan untuk traceroute.');
+            return;
+        }
+        const msgEl = document.getElementById('step' + stepNum + 'Msg');
+        const existingText = msgEl.innerHTML;
+        msgEl.innerHTML = existingText + '<div id="traceLoading_' + stepNum + '" style="margin-top:8px; color:#c084fc; font-weight:600;">⏳ Sedang melakukan Traceroute ke ' + escapeHtml(ip) + ' (maks 10 hop)...</div>';
+        
+        try {
+            const resp = await fetch('pppoe.php?action=ajax_trace_ip&ip=' + encodeURIComponent(ip));
+            const res = await resp.json();
+            const loader = document.getElementById('traceLoading_' + stepNum);
+            if (loader) loader.remove();
+
+            if (res.success) {
+                msgEl.innerHTML = msgEl.innerHTML + 
+                    '<div style="margin-top:8px; font-weight:600; color:#c084fc;">🌐 Hasil Traceroute ke ' + escapeHtml(ip) + ':</div>' +
+                    '<pre style="background: rgba(0,0,0,0.4); padding: 8px 10px; border-radius: 6px; font-family: monospace; font-size: 11px; color:#e2e8f0; white-space: pre-wrap; margin-top: 4px; border: 1px solid rgba(168,85,247,0.3); max-height: 200px; overflow-y: auto;">' + 
+                    escapeHtml(res.output) + '</pre>';
+            } else {
+                msgEl.innerHTML = msgEl.innerHTML + '<div style="margin-top:8px; color:#f87171;">⚠️ ' + escapeHtml(res.message) + '</div>';
+            }
+        } catch (e) {
+            const loader = document.getElementById('traceLoading_' + stepNum);
+            if (loader) loader.remove();
+            msgEl.innerHTML = msgEl.innerHTML + '<div style="margin-top:8px; color:#f87171;">⚠️ Error Traceroute: ' + escapeHtml(e.message) + '</div>';
+        }
+    }
+
+    function startPppoeSyncModal() {
+        document.getElementById('pppoeSyncModalOverlay').classList.add('active');
+        document.body.style.overflow = 'hidden';
+        
+        ['1','2','3','4'].forEach(num => {
+            const badge = document.getElementById('step' + num + 'Badge');
+            badge.className = 'step-badge pending';
+            badge.textContent = 'Menunggu';
+            const msg = document.getElementById('step' + num + 'Msg');
+            msg.className = 'step-msg';
+            msg.style.display = 'none';
+            msg.textContent = '';
+            const act = document.getElementById('step' + num + 'Actions');
+            act.style.display = 'none';
+        });
+        document.getElementById('btnFinishPppoeSync').style.display = 'none';
+
+        runPppoeStep1();
+    }
+
+    function closePppoeSyncModal() {
+        document.getElementById('pppoeSyncModalOverlay').classList.remove('active');
+        document.body.style.overflow = '';
+    }
+
+    function setStepState(stepNum, state, text, msgText = '') {
+        const badge = document.getElementById('step' + stepNum + 'Badge');
+        badge.className = 'step-badge ' + state;
+        badge.textContent = text;
+
+        const msg = document.getElementById('step' + stepNum + 'Msg');
+        if (msgText) {
+            msg.className = 'step-msg ' + (state === 'error' ? 'error' : 'success');
+            msg.textContent = msgText;
+            msg.style.display = 'block';
+        } else {
+            msg.style.display = 'none';
+        }
+
+        const act = document.getElementById('step' + stepNum + 'Actions');
+        if (state === 'error') {
+            act.style.display = 'flex';
+        } else {
+            act.style.display = 'none';
+        }
+    }
+
+    async function runPppoeStep1() {
+        setStepState('1', 'loading', 'Memproses...', '');
+        try {
+            const resp = await fetch('pppoe.php?action=ajax_test_mikrotik');
+            const res = await resp.json();
+            if (res.ip) currentMikrotikIp = res.ip;
+            if (res.success) {
+                setStepState('1', 'success', 'Berhasil', res.message);
+                runPppoeStep2();
+            } else {
+                setStepState('1', 'error', 'Gagal', res.message);
+            }
+        } catch (e) {
+            setStepState('1', 'error', 'Gagal', 'Error request: ' + e.message);
+        }
+    }
+
+    async function runPppoeStep2() {
+        setStepState('2', 'loading', 'Memproses...', '');
+        try {
+            const resp = await fetch('pppoe.php?action=ajax_sync_mikrotik');
+            const res = await resp.json();
+            if (res.success) {
+                setStepState('2', 'success', 'Berhasil', res.message);
+                runPppoeStep3();
+            } else {
+                setStepState('2', 'error', 'Gagal', res.message);
+            }
+        } catch (e) {
+            setStepState('2', 'error', 'Gagal', 'Error request: ' + e.message);
+        }
+    }
+
+    function skipPppoeToOlt() {
+        setStepState('1', 'skipped', 'Dilewati', 'Proses MikroTik dilewati.');
+        setStepState('2', 'skipped', 'Dilewati', 'Proses Sync MikroTik dilewati.');
+        runPppoeStep3();
+    }
+
+    async function runPppoeStep3() {
+        setStepState('3', 'loading', 'Memproses...', '');
+        try {
+            const resp = await fetch('pppoe.php?action=ajax_test_olt');
+            const res = await resp.json();
+            if (res.ip) currentOltIp = res.ip;
+            if (res.success) {
+                setStepState('3', 'success', 'Berhasil', res.message);
+                runPppoeStep4();
+            } else {
+                setStepState('3', 'error', 'Gagal', res.message);
+                document.getElementById('btnFinishPppoeSync').style.display = 'inline-flex';
+            }
+        } catch (e) {
+            setStepState('3', 'error', 'Gagal', 'Error request: ' + e.message);
+            document.getElementById('btnFinishPppoeSync').style.display = 'inline-flex';
+        }
+    }
+
+    async function runPppoeStep4() {
+        setStepState('4', 'loading', 'Memproses...', '');
+        try {
+            const resp = await fetch('pppoe.php?action=ajax_sync_olt');
+            const res = await resp.json();
+            if (res.success) {
+                setStepState('4', 'success', 'Berhasil', res.message);
+            } else {
+                setStepState('4', 'error', 'Gagal', res.message);
+            }
+        } catch (e) {
+            setStepState('4', 'error', 'Gagal', 'Error request: ' + e.message);
+        } finally {
+            document.getElementById('btnFinishPppoeSync').style.display = 'inline-flex';
+        }
+    }
+
+    function finishPppoeSync() {
+        window.location.href = 'pppoe.php?synced=1';
     }
 </script>
 </body>
